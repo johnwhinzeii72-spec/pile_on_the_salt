@@ -1,7 +1,35 @@
+# Dependencies
 node_modules
+
+# Production builds
 dist
-.DS_Store
-.env
-.env.local
+build
 .vite
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local platform and editor artifacts
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vscode
+.idea
+
+# Coverage and local tooling
 coverage
+.vercel
+.netlify
+
+# Archives and generated bundles
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
