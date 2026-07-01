@@ -1,9 +1,21 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
+const communityAuthFlow = (): Plugin => ({
+  name: 'pile-on-the-salt-community-auth-flow',
+  enforce: 'pre',
+  transform(code, id) {
+    if (!id.endsWith('/src/App.tsx') && !id.endsWith('\\src\\App.tsx')) return null;
+    return code
+      .replace("import { fetchProduct } from './openFoodFacts';", "import { fetchProduct } from './openFoodFacts';\nimport CommunityChatV2 from './community';")
+      .replace("{page === 'community' && <CommunityChat />}", "{page === 'community' && <CommunityChatV2 />}");
+  }
+});
+
 export default defineConfig({
   plugins: [
+    communityAuthFlow(),
     react(),
     VitePWA({
       registerType: 'autoUpdate',
