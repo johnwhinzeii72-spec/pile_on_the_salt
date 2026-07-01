@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Pile On The Salt icon">
+  <rect width="512" height="512" rx="112" fill="#0f766e"/>
+  <circle cx="256" cy="256" r="174" fill="#f8fafc"/>
+  <path d="M167 310c45 36 133 38 181 0" fill="none" stroke="#be123c" stroke-width="28" stroke-linecap="round"/>
+  <path d="M182 237h148c23 0 40 19 36 42l-2 14H148l-2-14c-4-23 13-42 36-42Z" fill="#14b8a6"/>
+  <path d="M203 181h106c18 0 32 14 32 32v24H171v-24c0-18 14-32 32-32Z" fill="#134e4a"/>
+  <circle cx="207" cy="281" r="13" fill="#f8fafc"/>
+  <circle cx="258" cy="281" r="13" fill="#f8fafc"/>
+  <circle cx="309" cy="281" r="13" fill="#f8fafc"/>
+</svg>
