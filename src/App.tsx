@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity,
+  AlertCircle,
   BarChart3,
   Camera,
   CheckCircle2,
-  ClipboardPlus,
   Droplets,
   HeartPulse,
   Home,
   LifeBuoy,
+  Loader2,
   Plus,
+  Search,
   Settings as SettingsIcon,
   Utensils,
   XCircle
@@ -26,7 +27,7 @@ import {
   saveSettings,
   saveSymptomLogs
 } from './storage';
-import type { FoodLog, Nutrients, PageId, ProductNutrition, Settings, SymptomLog } from './types';
+import type { FoodLog, NutrientAvailability, Nutrients, PageId, ProductNutrition, Settings, SymptomLog } from './types';
 
 type Totals = Nutrients & { fluidsOz: number };
 
@@ -35,6 +36,8 @@ type NavItem = {
   label: string;
   icon: typeof Home;
 };
+
+type LookupState = 'idle' | 'permission' | 'scanning' | 'loading' | 'found' | 'not-found' | 'api-error' | 'camera-error';
 
 const navItems: NavItem[] = [
   { id: 'dashboard', label: 'Today', icon: Home },
@@ -209,24 +212,86 @@ function GoalCard({ icon: Icon, label, value, goal, unit }: { icon: typeof Home;
 
 function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'createdAt'>) => void; onManual: () => void }) {
   const scannerRef = useRef<Html5Qrcode | null>(null);
-  const [status, setStatus] = useState('Camera ready.');
+  const processingRef = useRef(false);
+  const [status, setStatus] = useState('Ready to scan. Camera access is requested only when you tap Start Scan.');
+  const [lookupState, setLookupState] = useState<LookupState>('idle');
   const [product, setProduct] = useState<ProductNutrition | null>(null);
+  const [barcode, setBarcode] = useState('');
+  const [manualBarcode, setManualBarcode] = useState('');
   const [multiplier, setMultiplier] = useState(1);
-  const [scanning, setScanning] = useState(false);
+  const scanning = lookupState === 'permission' || lookupState === 'scanning';
+  const loading = lookupState === 'loading';
 
   const stop = async () => {
     const scanner = scannerRef.current;
-    if (scanner?.isScanning) await scanner.stop();
-    await scanner?.clear();
-    scannerRef.current = null;
-    setScanning(false);
+    if (!scanner) {
+      setLookupState((state) => (state === 'scanning' || state === 'permission' ? 'idle' : state));
+      return;
+    }
+
+    try {
+      if (scanner.isScanning) await scanner.stop();
+      await scanner.clear();
+    } catch {
+      // Camera cleanup can throw if Safari has already released the stream.
+    } finally {
+      scannerRef.current = null;
+      setLookupState((state) => (state === 'scanning' || state === 'permission' ? 'idle' : state));
+    }
+  };
+
+  const resetForScan = () => {
+    processingRef.current = false;
+    setBarcode('');
+    setProduct(null);
+    setMultiplier(1);
+    setStatus('Ready to scan. Camera access is requested only when you tap Start Scan.');
+    setLookupState('idle');
+  };
+
+  const lookupBarcode = async (value: string) => {
+    const cleanBarcode = value.trim();
+    if (!cleanBarcode || processingRef.current) return;
+
+    processingRef.current = true;
+    setBarcode(cleanBarcode);
+    setProduct(null);
+    setLookupState('loading');
+    setStatus(`Looking up ${cleanBarcode}...`);
+
+    try {
+      const found = await fetchProduct(cleanBarcode);
+      if (found) {
+        setProduct(found);
+        setLookupState('found');
+        setStatus('Product found. Review nutrients and add it to today when ready.');
+      } else {
+        setLookupState('not-found');
+        setStatus('Product not found in Open Food Facts. Use manual barcode or nutrition entry as a fallback.');
+      }
+    } catch {
+      setLookupState('api-error');
+      setStatus('Open Food Facts lookup failed. Check your connection or enter nutrition manually.');
+    } finally {
+      processingRef.current = false;
+    }
   };
 
   useEffect(() => () => { void stop(); }, []);
 
   const start = async () => {
-    setProduct(null);
-    setStatus('Starting camera...');
+    await stop();
+    resetForScan();
+
+    if (!window.isSecureContext) {
+      setLookupState('camera-error');
+      setStatus('Camera scanning requires HTTPS. On iPhone Safari, open the installed app or the HTTPS site before scanning.');
+      return;
+    }
+
+    setLookupState('permission');
+    setStatus('Safari may ask for camera permission. Choose Allow, then point the camera at a UPC, EAN, or Code128 barcode.');
+
     try {
       const scanner = new Html5Qrcode('reader', {
         formatsToSupport: [
@@ -238,31 +303,34 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
         ]
       });
       scannerRef.current = scanner;
-      setScanning(true);
       await scanner.start(
         { facingMode: 'environment' },
-        { fps: 10, qrbox: { width: 260, height: 160 }, aspectRatio: 1.7778 },
+        { fps: 8, qrbox: { width: 260, height: 160 }, aspectRatio: 1.7778 },
         async (decodedText) => {
+          if (processingRef.current) return;
+          processingRef.current = true;
+          const cleanBarcode = decodedText.trim();
+          setBarcode(cleanBarcode);
+          setStatus('Barcode captured. Stopping camera and looking up product...');
           await stop();
-          setStatus(`Looking up ${decodedText}...`);
-          try {
-            const found = await fetchProduct(decodedText);
-            if (found) {
-              setProduct(found);
-              setStatus('Product found.');
-            } else {
-              setStatus('Product not found. Use manual entry as a fallback.');
-            }
-          } catch {
-            setStatus('Lookup failed. Check your connection or use manual entry.');
-          }
+          processingRef.current = false;
+          await lookupBarcode(cleanBarcode);
         },
         () => undefined
       );
+      setLookupState('scanning');
+      setStatus('Camera is active. Hold the barcode inside the frame.');
     } catch {
-      setStatus('Camera access failed. iPhone Safari requires HTTPS and camera permission.');
-      setScanning(false);
+      processingRef.current = false;
+      scannerRef.current = null;
+      setLookupState('camera-error');
+      setStatus('Camera access failed. On iPhone Safari, scanning requires HTTPS and camera permission.');
     }
+  };
+
+  const submitManualBarcode = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void stop().then(() => lookupBarcode(manualBarcode));
   };
 
   const scaled = product ? applyMultiplier(product, multiplier) : null;
@@ -270,29 +338,77 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
   return (
     <section className="space-y-5">
       <Panel title="Barcode Scanner">
-        <div id="reader" className="min-h-56 overflow-hidden rounded-lg bg-slate-900" />
-        <p className="mt-3 text-sm font-semibold text-slate-600">{status}</p>
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <button type="button" onClick={start} disabled={scanning} className="rounded-lg bg-salt-700 px-4 py-3 font-bold text-white disabled:bg-slate-300">Start Scan</button>
-          <button type="button" onClick={() => void stop()} className="rounded-lg border border-slate-300 px-4 py-3 font-bold text-slate-700">Stop</button>
+        <div className="rounded-lg border border-salt-100 bg-salt-50 p-3 text-sm font-semibold text-salt-900">
+          Tap Start Scan to request camera access. For iPhone Safari, use the HTTPS site or installed PWA and allow camera permission when prompted.
         </div>
-        <button type="button" onClick={onManual} className="mt-3 w-full rounded-lg bg-slate-100 px-4 py-3 font-bold text-slate-700">Manual fallback</button>
+        <div id="reader" className="mt-4 min-h-56 overflow-hidden rounded-lg bg-slate-900" />
+        <ScannerStatus state={lookupState} status={status} />
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <button type="button" onClick={start} disabled={scanning || loading} className="rounded-lg bg-salt-700 px-4 py-3 font-bold text-white disabled:bg-slate-300">
+            {lookupState === 'found' || lookupState === 'not-found' || lookupState === 'api-error' ? 'Scan Again' : 'Start Scan'}
+          </button>
+          <button type="button" onClick={() => void stop()} disabled={!scanning} className="rounded-lg border border-slate-300 px-4 py-3 font-bold text-slate-700 disabled:text-slate-300">Stop</button>
+        </div>
+        <form onSubmit={submitManualBarcode} className="mt-4 grid grid-cols-[1fr_auto] gap-2">
+          <input
+            value={manualBarcode}
+            onChange={(event) => setManualBarcode(event.target.value)}
+            inputMode="numeric"
+            autoComplete="off"
+            placeholder="Enter barcode"
+            className="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-salt-700"
+          />
+          <button type="submit" disabled={loading || !manualBarcode.trim()} className="grid h-12 w-12 place-items-center rounded-lg bg-slate-900 text-white disabled:bg-slate-300" aria-label="Look up barcode">
+            {loading ? <Loader2 className="animate-spin" size={20} /> : <Search size={20} />}
+          </button>
+        </form>
+        <button type="button" onClick={onManual} className="mt-3 w-full rounded-lg bg-slate-100 px-4 py-3 font-bold text-slate-700">Manual nutrition entry</button>
       </Panel>
+
+      {(lookupState === 'not-found' || lookupState === 'api-error') && (
+        <Panel title={lookupState === 'not-found' ? 'Product Not Found' : 'Lookup Error'}>
+          <p className="text-sm font-semibold text-slate-600">
+            {lookupState === 'not-found'
+              ? `${barcode || 'That barcode'} was not found in Open Food Facts.`
+              : 'Open Food Facts could not be reached or returned an error.'}
+          </p>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <button type="button" onClick={start} className="rounded-lg bg-salt-700 px-4 py-3 font-bold text-white">Scan Again</button>
+            <button type="button" onClick={onManual} className="rounded-lg bg-slate-100 px-4 py-3 font-bold text-slate-700">Manual Entry</button>
+          </div>
+        </Panel>
+      )}
 
       {product && scaled && (
         <Panel title="Product Details">
           <div className="space-y-1">
             <h2 className="text-xl font-black">{product.name}</h2>
             <p className="text-sm font-semibold text-slate-500">{product.brand || 'Brand unavailable'} · {product.servingSize || 'Serving size unavailable'}</p>
+            <p className="text-xs font-bold uppercase text-slate-400">Barcode {product.barcode}</p>
           </div>
           <div className="mt-4 flex gap-2">
             {multipliers.map((value) => <button key={value} type="button" onClick={() => setMultiplier(value)} className={`rounded-lg px-3 py-2 text-sm font-bold ${multiplier === value ? 'bg-salt-700 text-white' : 'bg-slate-100 text-slate-700'}`}>{value}x</button>)}
           </div>
-          <NutrientGrid nutrients={scaled} />
-          <button type="button" onClick={() => onAdd({ ...scaled, name: product.name, brand: product.brand, servingSize: product.servingSize, fluidsOz: 0, source: 'scanner', barcode: product.barcode, multiplier })} className="mt-4 w-full rounded-lg bg-berry px-4 py-3 font-bold text-white">Add To Today</button>
+          <NutrientGrid nutrients={scaled} availability={product.availableNutrients} />
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <button type="button" onClick={() => onAdd({ ...scaled, name: product.name, brand: product.brand, servingSize: product.servingSize, fluidsOz: 0, source: 'scanner', barcode: product.barcode, multiplier })} className="rounded-lg bg-berry px-4 py-3 font-bold text-white">Add To Today</button>
+            <button type="button" onClick={start} className="rounded-lg bg-slate-100 px-4 py-3 font-bold text-slate-700">Scan Again</button>
+          </div>
         </Panel>
       )}
     </section>
+  );
+}
+
+function ScannerStatus({ state, status }: { state: LookupState; status: string }) {
+  const isError = state === 'api-error' || state === 'camera-error' || state === 'not-found';
+  const isLoading = state === 'loading' || state === 'permission';
+
+  return (
+    <div className={`mt-3 flex items-start gap-2 rounded-lg p-3 text-sm font-semibold ${isError ? 'bg-rose-50 text-rose-950' : 'bg-slate-50 text-slate-600'}`}>
+      {isLoading ? <Loader2 className="mt-0.5 shrink-0 animate-spin" size={18} /> : isError ? <AlertCircle className="mt-0.5 shrink-0" size={18} /> : <CheckCircle2 className="mt-0.5 shrink-0 text-salt-700" size={18} />}
+      <p>{status}</p>
+    </div>
   );
 }
 
@@ -434,17 +550,25 @@ function EntryForm({ title, onSubmit, fields, includeNotes }: { title: string; o
   );
 }
 
-function NutrientGrid({ nutrients }: { nutrients: Nutrients }) {
+function NutrientGrid({ nutrients, availability }: { nutrients: Nutrients; availability?: NutrientAvailability }) {
+  const nutrientRows: Array<[keyof Nutrients, string, string, number]> = [
+    ['sodiumMg', 'Sodium', 'mg', nutrients.sodiumMg],
+    ['potassiumMg', 'Potassium', 'mg', nutrients.potassiumMg],
+    ['magnesiumMg', 'Magnesium', 'mg', nutrients.magnesiumMg],
+    ['calciumMg', 'Calcium', 'mg', nutrients.calciumMg],
+    ['carbohydratesG', 'Carbs', 'g', nutrients.carbohydratesG],
+    ['sugarsG', 'Sugars', 'g', nutrients.sugarsG],
+    ['proteinG', 'Protein', 'g', nutrients.proteinG],
+    ['caffeineMg', 'Caffeine', 'mg', nutrients.caffeineMg]
+  ];
+
   return (
     <div className="mt-4 grid grid-cols-2 gap-3">
-      <Metric label="Sodium" value={`${fmt(nutrients.sodiumMg)} mg`} />
-      <Metric label="Potassium" value={`${fmt(nutrients.potassiumMg)} mg`} />
-      <Metric label="Magnesium" value={`${fmt(nutrients.magnesiumMg)} mg`} />
-      <Metric label="Calcium" value={`${fmt(nutrients.calciumMg)} mg`} />
-      <Metric label="Carbs" value={`${nutrients.carbohydratesG.toFixed(1)} g`} />
-      <Metric label="Sugars" value={`${nutrients.sugarsG.toFixed(1)} g`} />
-      <Metric label="Protein" value={`${nutrients.proteinG.toFixed(1)} g`} />
-      <Metric label="Caffeine" value={`${fmt(nutrients.caffeineMg)} mg`} />
+      {nutrientRows.map(([key, label, unit, value]) => {
+        const isAvailable = availability?.[key] ?? true;
+        const displayValue = isAvailable ? `${unit === 'g' ? value.toFixed(1) : fmt(value)} ${unit}` : 'Not listed';
+        return <Metric key={key} label={label} value={displayValue} muted={!isAvailable} />;
+      })}
     </div>
   );
 }
@@ -453,8 +577,8 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   return <section className="rounded-lg bg-white p-4 shadow-soft"><h2 className="mb-4 text-lg font-black">{title}</h2>{children}</section>;
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-lg bg-salt-50 p-3"><p className="text-xs font-bold uppercase text-salt-900/70">{label}</p><p className="mt-1 text-lg font-black text-salt-900">{value}</p></div>;
+function Metric({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {
+  return <div className={`rounded-lg p-3 ${muted ? 'bg-slate-50' : 'bg-salt-50'}`}><p className={`text-xs font-bold uppercase ${muted ? 'text-slate-400' : 'text-salt-900/70'}`}>{label}</p><p className={`mt-1 text-lg font-black ${muted ? 'text-slate-500' : 'text-salt-900'}`}>{value}</p></div>;
 }
 
 function FoodRow({ food }: { food: FoodLog }) {
