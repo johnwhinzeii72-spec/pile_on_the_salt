@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Session, User } from '@supabase/supabase-js';
 import {
   AlertCircle,
   BarChart3,
@@ -9,27 +10,37 @@ import {
   Home,
   LifeBuoy,
   Loader2,
+  MessageCircle,
   Moon,
+  Pencil,
   Plus,
+  Save,
   Search,
   Settings as SettingsIcon,
+  Star,
   Sun,
+  Trash2,
   Utensils,
   XCircle
 } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { fetchProduct } from './openFoodFacts';
+import { isSupabaseConfigured, supabase } from './supabaseClient';
 import {
+  dateKey,
   defaultSettings,
+  isSameDate,
   isToday,
   loadFoodLogs,
+  loadSavedFoods,
   loadSettings,
   loadSymptomLogs,
   saveFoodLogs,
+  saveSavedFoods,
   saveSettings,
   saveSymptomLogs
 } from './storage';
-import type { FoodLog, NutrientAvailability, Nutrients, PageId, ProductNutrition, Settings, SymptomLog } from './types';
+import type { ChatMessage, ChatRoom, FoodCategory, FoodLog, MemberProfile, NutrientAvailability, Nutrients, PageId, ProductNutrition, SavedFood, Settings, SymptomLog } from './types';
 
 type Totals = Nutrients & { fluidsOz: number };
 type Theme = 'light' | 'dark';
@@ -39,24 +50,27 @@ type LookupState = 'idle' | 'permission' | 'scanning' | 'loading' | 'found' | 'n
 const navItems: NavItem[] = [
   { id: 'dashboard', label: 'Today', icon: Home },
   { id: 'scanner', label: 'Scan', icon: Camera },
-  { id: 'manual', label: 'Manual', icon: Plus },
+  { id: 'manual', label: 'Log', icon: Plus },
+  { id: 'saved', label: 'Saved', icon: Star },
   { id: 'symptoms', label: 'Symptoms', icon: HeartPulse },
   { id: 'insights', label: 'Insights', icon: BarChart3 },
   { id: 'help', label: 'Help', icon: LifeBuoy },
+  { id: 'community', label: 'Chat', icon: MessageCircle },
   { id: 'settings', label: 'Settings', icon: SettingsIcon }
 ];
 
-const emptyNutrients: Nutrients = {
-  sodiumMg: 0,
-  potassiumMg: 0,
-  magnesiumMg: 0,
-  calciumMg: 0,
-  carbohydratesG: 0,
-  sugarsG: 0,
-  proteinG: 0,
-  caffeineMg: 0
-};
+const foodCategories: Array<{ value: FoodCategory; label: string }> = [
+  { value: 'produce', label: 'Produce' },
+  { value: 'fruit', label: 'Fruit' },
+  { value: 'vegetable', label: 'Vegetable' },
+  { value: 'homemade', label: 'Homemade meal' },
+  { value: 'restaurant', label: 'Restaurant food' },
+  { value: 'custom', label: 'Custom food' },
+  { value: 'packaged', label: 'Packaged food' }
+];
 
+const fallbackRooms = ['General', 'Newly Diagnosed', 'Parents & Caregivers', 'College / School', 'Flares & Bad Days', 'Food / Salt Tips', 'EDS / Hypermobility', 'Local Groups'];
+const emptyNutrients: Nutrients = { sodiumMg: 0, potassiumMg: 0, magnesiumMg: 0, calciumMg: 0, carbohydratesG: 0, sugarsG: 0, proteinG: 0, caffeineMg: 0 };
 const multipliers = [0.5, 1, 1.5, 2];
 const uid = () => ('crypto' in window && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
 const numberField = (form: FormData, key: string) => Math.max(0, Number(form.get(key)) || 0);
@@ -84,24 +98,25 @@ function getInitialTheme(): Theme {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
-function App() {
-  const [page, setPage] = useState<PageId>('dashboard');
-  const [foodLogs, setFoodLogs] = useState<FoodLog[]>(() => loadFoodLogs());
-  const [symptomLogs, setSymptomLogs] = useState<SymptomLog[]>(() => loadSymptomLogs());
-  const [settings, setSettings] = useState<Settings>(() => loadSettings());
-  const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+function foodToSaved(food: Omit<FoodLog, 'id' | 'createdAt'> | FoodLog): SavedFood {
+  const now = new Date().toISOString();
+  return {
+    ...emptyNutrients,
+    ...food,
+    id: uid(),
+    name: food.name,
+    fluidsOz: food.fluidsOz || 0,
+    createdAt: now,
+    updatedAt: now
+  };
+}
 
-  useEffect(() => saveFoodLogs(foodLogs), [foodLogs]);
-  useEffect(() => saveSymptomLogs(symptomLogs), [symptomLogs]);
-  useEffect(() => saveSettings(settings), [settings]);
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', theme === 'dark');
-    localStorage.setItem('pile-on-the-salt.theme', theme);
-  }, [theme]);
+function savedToLog(food: SavedFood): Omit<FoodLog, 'id' | 'createdAt'> {
+  return { ...food, source: 'saved', multiplier: 1 };
+}
 
-  const todayFoods = useMemo(() => foodLogs.filter((log) => isToday(log.createdAt)), [foodLogs]);
-  const todaySymptoms = useMemo(() => symptomLogs.filter((log) => isToday(log.createdAt)), [symptomLogs]);
-  const totals = useMemo<Totals>(() => todayFoods.reduce((sum, item) => ({
+function totalsFor(foods: FoodLog[]): Totals {
+  return foods.reduce((sum, item) => ({
     sodiumMg: sum.sodiumMg + item.sodiumMg,
     potassiumMg: sum.potassiumMg + item.potassiumMg,
     magnesiumMg: sum.magnesiumMg + item.magnesiumMg,
@@ -111,10 +126,38 @@ function App() {
     proteinG: sum.proteinG + item.proteinG,
     caffeineMg: sum.caffeineMg + item.caffeineMg,
     fluidsOz: sum.fluidsOz + item.fluidsOz
-  }), { ...emptyNutrients, fluidsOz: 0 }), [todayFoods]);
+  }), { ...emptyNutrients, fluidsOz: 0 });
+}
 
-  const addFood = (entry: Omit<FoodLog, 'id' | 'createdAt'>) => {
-    setFoodLogs((logs) => [{ ...entry, id: uid(), createdAt: new Date().toISOString() }, ...logs]);
+function App() {
+  const [page, setPage] = useState<PageId>('dashboard');
+  const [foodLogs, setFoodLogs] = useState<FoodLog[]>(() => loadFoodLogs());
+  const [savedFoods, setSavedFoods] = useState<SavedFood[]>(() => loadSavedFoods());
+  const [symptomLogs, setSymptomLogs] = useState<SymptomLog[]>(() => loadSymptomLogs());
+  const [settings, setSettings] = useState<Settings>(() => loadSettings());
+  const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+
+  useEffect(() => saveFoodLogs(foodLogs), [foodLogs]);
+  useEffect(() => saveSavedFoods(savedFoods), [savedFoods]);
+  useEffect(() => saveSymptomLogs(symptomLogs), [symptomLogs]);
+  useEffect(() => saveSettings(settings), [settings]);
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    localStorage.setItem('pile-on-the-salt.theme', theme);
+  }, [theme]);
+
+  const todayFoods = useMemo(() => foodLogs.filter((log) => isToday(log.createdAt)), [foodLogs]);
+  const todaySymptoms = useMemo(() => symptomLogs.filter((log) => isToday(log.createdAt)), [symptomLogs]);
+  const totals = useMemo(() => totalsFor(todayFoods), [todayFoods]);
+
+  const saveFavorite = (food: Omit<FoodLog, 'id' | 'createdAt'> | FoodLog) => {
+    setSavedFoods((foods) => [foodToSaved(food), ...foods]);
+  };
+
+  const addFood = (entry: Omit<FoodLog, 'id' | 'createdAt'>, saveToFavorites = false) => {
+    const log = { ...entry, id: uid(), createdAt: new Date().toISOString() };
+    setFoodLogs((logs) => [log, ...logs]);
+    if (saveToFavorites) saveFavorite(log);
     setPage('dashboard');
   };
 
@@ -134,37 +177,30 @@ function App() {
             <h1 className="truncate text-2xl font-black">{title}</h1>
           </div>
           <div className="flex items-center gap-2">
-            <button type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="grid h-12 w-12 place-items-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-sm transition active:scale-95 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>
-              <ThemeIcon size={21} />
-            </button>
-            <button type="button" onClick={() => setPage('scanner')} className="grid h-12 w-12 place-items-center rounded-full bg-salt-700 text-white shadow-soft transition active:scale-95 dark:bg-salt-500 dark:text-slate-950" aria-label="Open barcode scanner">
-              <Camera size={22} />
-            </button>
+            <button type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="grid h-12 w-12 place-items-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-sm transition active:scale-95 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}><ThemeIcon size={21} /></button>
+            <button type="button" onClick={() => setPage('scanner')} className="grid h-12 w-12 place-items-center rounded-full bg-salt-700 text-white shadow-soft transition active:scale-95 dark:bg-salt-500 dark:text-slate-950" aria-label="Open barcode scanner"><Camera size={22} /></button>
           </div>
         </div>
       </header>
 
       <main key={page} className="page-enter mx-auto max-w-3xl px-4 py-5">
-        {page === 'dashboard' && <Dashboard totals={totals} settings={settings} foods={todayFoods} symptoms={todaySymptoms} />}
-        {page === 'scanner' && <Scanner onAdd={addFood} onManual={() => setPage('manual')} />}
+        {page === 'dashboard' && <Dashboard totals={totals} settings={settings} foods={todayFoods} symptoms={todaySymptoms} onSaveFood={saveFavorite} />}
+        {page === 'scanner' && <Scanner onAdd={addFood} onManual={() => setPage('manual')} onSaveFood={saveFavorite} />}
         {page === 'manual' && <ManualEntry onAdd={addFood} />}
+        {page === 'saved' && <SavedFoodsPage savedFoods={savedFoods} setSavedFoods={setSavedFoods} onAdd={(food) => addFood(savedToLog(food))} />}
         {page === 'symptoms' && <SymptomTracker onAdd={addSymptom} logs={todaySymptoms} />}
         {page === 'insights' && <Insights foods={foodLogs} symptoms={symptomLogs} settings={settings} />}
         {page === 'help' && <HelpNow settings={settings} />}
+        {page === 'community' && <CommunityChat />}
         {page === 'settings' && <SettingsPage settings={settings} setSettings={setSettings} />}
       </main>
 
       <nav className="safe-bottom fixed inset-x-0 bottom-0 z-30 border-t border-slate-200/80 bg-white/92 px-2 pt-2 shadow-[0_-12px_35px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/90 dark:shadow-[0_-12px_35px_rgba(0,0,0,0.35)]" aria-label="Primary navigation">
-        <div className="mx-auto grid max-w-3xl grid-cols-7 gap-1">
+        <div className="mx-auto flex max-w-3xl gap-1 overflow-x-auto pb-1">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = page === item.id;
-            return (
-              <button key={item.id} type="button" onClick={() => setPage(item.id)} aria-label={`Open ${item.label}`} aria-current={active ? 'page' : undefined} className={`flex min-h-14 flex-col items-center justify-center rounded-xl px-1 text-[11px] font-bold transition active:scale-95 ${active ? 'bg-salt-50 text-salt-900 dark:bg-salt-500/15 dark:text-salt-100' : 'text-slate-500 dark:text-slate-400'}`}>
-                <Icon size={20} aria-hidden="true" />
-                <span className="mt-1 truncate">{item.label}</span>
-              </button>
-            );
+            return <button key={item.id} type="button" onClick={() => setPage(item.id)} aria-label={`Open ${item.label}`} aria-current={active ? 'page' : undefined} className={`flex min-h-14 min-w-[4.25rem] flex-col items-center justify-center rounded-xl px-2 text-[11px] font-bold transition active:scale-95 ${active ? 'bg-salt-50 text-salt-900 dark:bg-salt-500/15 dark:text-salt-100' : 'text-slate-500 dark:text-slate-400'}`}><Icon size={20} aria-hidden="true" /><span className="mt-1 truncate">{item.label}</span></button>;
           })}
         </div>
       </nav>
@@ -172,49 +208,19 @@ function App() {
   );
 }
 
-function Dashboard({ totals, settings, foods, symptoms }: { totals: Totals; settings: Settings; foods: FoodLog[]; symptoms: SymptomLog[] }) {
-  return (
-    <section className="space-y-5">
-      <div className="grid gap-4 sm:grid-cols-2">
-        <GoalCard icon={Utensils} label="Sodium" value={totals.sodiumMg} goal={settings.sodiumGoalMg} unit="mg" />
-        <GoalCard icon={Droplets} label="Fluids" value={totals.fluidsOz} goal={settings.fluidGoalOz} unit="oz" />
-      </div>
-      <div className="grid grid-cols-3 gap-3">
-        <Metric label="Potassium" value={`${fmt(totals.potassiumMg)} mg`} />
-        <Metric label="Magnesium" value={`${fmt(totals.magnesiumMg)} mg`} />
-        <Metric label="Calcium" value={`${fmt(totals.calciumMg)} mg`} />
-      </div>
-      <Panel title="Foods Logged Today">
-        {foods.length === 0 ? <Empty text="No foods logged yet." /> : foods.map((food) => <FoodRow key={food.id} food={food} />)}
-      </Panel>
-      <Panel title="Symptom Check-ins">
-        {symptoms.length === 0 ? <Empty text="No symptom check-ins today." /> : symptoms.map((log) => <SymptomRow key={log.id} log={log} />)}
-      </Panel>
-    </section>
-  );
+function Dashboard({ totals, settings, foods, symptoms, onSaveFood }: { totals: Totals; settings: Settings; foods: FoodLog[]; symptoms: SymptomLog[]; onSaveFood: (food: FoodLog) => void }) {
+  return <section className="space-y-5"><div className="grid gap-4 sm:grid-cols-2"><GoalCard icon={Utensils} label="Sodium" value={totals.sodiumMg} goal={settings.sodiumGoalMg} unit="mg" /><GoalCard icon={Droplets} label="Fluids" value={totals.fluidsOz} goal={settings.fluidGoalOz} unit="oz" /></div><div className="grid grid-cols-3 gap-3"><Metric label="Potassium" value={`${fmt(totals.potassiumMg)} mg`} /><Metric label="Magnesium" value={`${fmt(totals.magnesiumMg)} mg`} /><Metric label="Calcium" value={`${fmt(totals.calciumMg)} mg`} /></div><Panel title="Foods Logged Today">{foods.length === 0 ? <Empty text="No foods logged yet." /> : foods.map((food) => <FoodRow key={food.id} food={food} onSave={() => onSaveFood(food)} />)}</Panel><Panel title="Symptom Check-ins">{symptoms.length === 0 ? <Empty text="No symptom check-ins today." /> : symptoms.map((log) => <SymptomRow key={log.id} log={log} />)}</Panel></section>;
 }
 
 function GoalCard({ icon: Icon, label, value, goal, unit }: { icon: typeof Home; label: string; value: number; goal: number; unit: string }) {
   const percent = goal > 0 ? Math.min(100, Math.round((value / goal) * 100)) : 0;
-  return (
-    <div className="rounded-2xl bg-white p-4 shadow-soft transition-colors dark:bg-slate-900 dark:shadow-night">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <p className="text-sm font-bold text-slate-500 dark:text-slate-400">{label}</p>
-          <p className="mt-1 text-3xl font-black">{fmt(value)} <span className="text-base text-slate-500 dark:text-slate-400">{unit}</span></p>
-        </div>
-        <div className="grid h-12 w-12 place-items-center rounded-full bg-salt-50 text-salt-900 dark:bg-salt-500/15 dark:text-salt-100"><Icon aria-hidden="true" /></div>
-      </div>
-      <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-salt-700 dark:bg-salt-500" style={{ width: `${percent}%` }} /></div>
-      <p className="mt-2 text-xs font-semibold text-slate-500 dark:text-slate-400">{percent}% of {fmt(goal)} {unit}</p>
-    </div>
-  );
+  return <div className="rounded-2xl bg-white p-4 shadow-soft transition-colors dark:bg-slate-900 dark:shadow-night"><div className="flex items-center justify-between gap-4"><div><p className="text-sm font-bold text-slate-500 dark:text-slate-400">{label}</p><p className="mt-1 text-3xl font-black">{fmt(value)} <span className="text-base text-slate-500 dark:text-slate-400">{unit}</span></p></div><div className="grid h-12 w-12 place-items-center rounded-full bg-salt-50 text-salt-900 dark:bg-salt-500/15 dark:text-salt-100"><Icon aria-hidden="true" /></div></div><div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-salt-700 dark:bg-salt-500" style={{ width: `${percent}%` }} /></div><p className="mt-2 text-xs font-semibold text-slate-500 dark:text-slate-400">{percent}% of {fmt(goal)} {unit}</p></div>;
 }
 
-function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'createdAt'>) => void; onManual: () => void }) {
+function Scanner({ onAdd, onManual, onSaveFood }: { onAdd: (entry: Omit<FoodLog, 'id' | 'createdAt'>, saveToFavorites?: boolean) => void; onManual: () => void; onSaveFood: (food: Omit<FoodLog, 'id' | 'createdAt'>) => void }) {
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const processingRef = useRef(false);
-  const [status, setStatus] = useState('Ready to scan. Camera access is requested only when you tap Start Scan.');
+  const [status, setStatus] = useState('Ready to scan. Camera access is requested only when you tap Start Scanner.');
   const [lookupState, setLookupState] = useState<LookupState>('idle');
   const [product, setProduct] = useState<ProductNutrition | null>(null);
   const [barcode, setBarcode] = useState('');
@@ -229,26 +235,18 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
       setLookupState((state) => (state === 'scanning' || state === 'permission' ? 'idle' : state));
       return;
     }
-
     try {
       if (scanner.isScanning) await scanner.stop();
       await scanner.clear();
     } catch {
-      // Camera cleanup can throw if Safari has already released the stream.
+      // Safari may release the stream before html5-qrcode finishes cleanup.
     } finally {
       scannerRef.current = null;
       setLookupState((state) => (state === 'scanning' || state === 'permission' ? 'idle' : state));
     }
   };
 
-  const resetForScan = () => {
-    processingRef.current = false;
-    setBarcode('');
-    setProduct(null);
-    setMultiplier(1);
-    setStatus('Ready to scan. Camera access is requested only when you tap Start Scan.');
-    setLookupState('idle');
-  };
+  const resetForScan = () => { processingRef.current = false; setBarcode(''); setProduct(null); setMultiplier(1); setStatus('Ready to scan. Camera access is requested only when you tap Start Scanner.'); setLookupState('idle'); };
 
   const lookupBarcode = async (value: string) => {
     const cleanBarcode = value.trim();
@@ -258,23 +256,14 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
     setProduct(null);
     setLookupState('loading');
     setStatus(`Looking up ${cleanBarcode}...`);
-
     try {
       const found = await fetchProduct(cleanBarcode);
-      if (found) {
-        setProduct(found);
-        setLookupState('found');
-        setStatus('Product found. Review nutrients and add it to today when ready.');
-      } else {
-        setLookupState('not-found');
-        setStatus('Product not found in Open Food Facts. Use manual barcode or nutrition entry as a fallback.');
-      }
+      if (found) { setProduct(found); setLookupState('found'); setStatus('Product found. Review nutrients and add it to today when ready.'); }
+      else { setLookupState('not-found'); setStatus('Product not found in Open Food Facts. Use manual barcode or nutrition entry as a fallback.'); }
     } catch {
       setLookupState('api-error');
       setStatus('Open Food Facts lookup failed. Check your connection or enter nutrition manually.');
-    } finally {
-      processingRef.current = false;
-    }
+    } finally { processingRef.current = false; }
   };
 
   useEffect(() => () => { void stop(); }, []);
@@ -282,39 +271,24 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
   const start = async () => {
     await stop();
     resetForScan();
-
-    if (!window.isSecureContext) {
-      setLookupState('camera-error');
-      setStatus('Camera scanning requires HTTPS. On iPhone Safari, open the installed app or the HTTPS site before scanning.');
-      return;
-    }
-
+    if (!window.isSecureContext) { setLookupState('camera-error'); setStatus('Camera scanning requires HTTPS. On iPhone Safari, open the installed app or the HTTPS site before scanning.'); return; }
     setLookupState('permission');
     setStatus('Safari may ask for camera permission. Choose Allow, then point the camera at a UPC, EAN, or Code128 barcode.');
-
     try {
-      const scanner = new Html5Qrcode('reader', {
-        verbose: false,
-        formatsToSupport: [Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.CODE_128]
-      });
+      const scanner = new Html5Qrcode('reader', { verbose: false, formatsToSupport: [Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.CODE_128] });
       scannerRef.current = scanner;
-      await scanner.start(
-        { facingMode: 'environment' },
-        { fps: 8, qrbox: { width: 260, height: 160 }, aspectRatio: 1.7778 },
-        async (decodedText) => {
-          if (processingRef.current) return;
-          processingRef.current = true;
-          const cleanBarcode = decodedText.trim();
-          setBarcode(cleanBarcode);
-          setStatus('Barcode captured. Stopping camera and looking up product...');
-          await stop();
-          processingRef.current = false;
-          await lookupBarcode(cleanBarcode);
-        },
-        () => undefined
-      );
+      await scanner.start({ facingMode: 'environment' }, { fps: 8, qrbox: { width: 260, height: 160 }, aspectRatio: 1.7778 }, async (decodedText) => {
+        if (processingRef.current) return;
+        processingRef.current = true;
+        const cleanBarcode = decodedText.trim();
+        setBarcode(cleanBarcode);
+        setStatus('Barcode captured. Stopping camera and looking up product...');
+        await stop();
+        processingRef.current = false;
+        await lookupBarcode(cleanBarcode);
+      }, () => undefined);
       setLookupState('scanning');
-      setStatus('Camera is active. Hold the barcode inside the frame.');
+      setStatus('Scanner is active. Hold the barcode inside the frame.');
     } catch {
       processingRef.current = false;
       scannerRef.current = null;
@@ -323,221 +297,164 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
     }
   };
 
-  const submitManualBarcode = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void stop().then(() => lookupBarcode(manualBarcode));
-  };
-
+  const submitManualBarcode = (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); void stop().then(() => lookupBarcode(manualBarcode)); };
   const scaled = product ? applyMultiplier(product, multiplier) : null;
+  const productLog = product && scaled ? { ...scaled, name: product.name, brand: product.brand, servingSize: product.servingSize, category: 'packaged' as FoodCategory, fluidsOz: 0, source: 'scanner' as const, barcode: product.barcode, multiplier } : null;
 
-  return (
-    <section className="space-y-5">
-      <Panel title="Barcode Scanner">
-        <div className="rounded-xl border border-salt-100 bg-salt-50 p-3 text-sm font-semibold text-salt-900 dark:border-salt-500/20 dark:bg-salt-500/10 dark:text-salt-100">
-          Tap Start Scan to request camera access. For iPhone Safari, use the HTTPS site or installed PWA and allow camera permission when prompted.
-        </div>
-        <div id="reader" className="mt-4 min-h-56 overflow-hidden rounded-2xl bg-slate-900 ring-1 ring-slate-200 dark:ring-slate-700" />
-        <ScannerStatus state={lookupState} status={status} />
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <button type="button" onClick={start} disabled={scanning || loading} className={buttonPrimary}>{lookupState === 'found' || lookupState === 'not-found' || lookupState === 'api-error' ? 'Scan Again' : 'Start Scan'}</button>
-          <button type="button" onClick={() => void stop()} disabled={!scanning} className={buttonSecondary}>Stop</button>
-        </div>
-        <form onSubmit={submitManualBarcode} className="mt-4 grid grid-cols-[1fr_auto] gap-2" aria-label="Manual barcode lookup">
-          <input value={manualBarcode} onChange={(event) => setManualBarcode(event.target.value)} inputMode="numeric" autoComplete="off" aria-label="Barcode number" placeholder="Enter barcode" className="min-h-12 min-w-0 rounded-xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none transition focus:border-salt-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-500" />
-          <button type="submit" disabled={loading || !manualBarcode.trim()} className="grid h-12 w-12 place-items-center rounded-xl bg-slate-900 text-white transition active:scale-95 disabled:bg-slate-300 dark:bg-slate-100 dark:text-slate-950 dark:disabled:bg-slate-700" aria-label="Look up barcode">
-            {loading ? <Loader2 className="animate-spin" size={20} aria-hidden="true" /> : <Search size={20} aria-hidden="true" />}
-          </button>
-        </form>
-        <button type="button" onClick={onManual} className="mt-3 w-full min-h-12 rounded-xl bg-slate-100 px-4 py-3 font-bold text-slate-700 transition active:scale-[0.99] dark:bg-slate-800 dark:text-slate-100">Manual nutrition entry</button>
-      </Panel>
-
-      {(lookupState === 'not-found' || lookupState === 'api-error') && (
-        <Panel title={lookupState === 'not-found' ? 'Product Not Found' : 'Lookup Error'}>
-          <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">{lookupState === 'not-found' ? `${barcode || 'That barcode'} was not found in Open Food Facts.` : 'Open Food Facts could not be reached or returned an error.'}</p>
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <button type="button" onClick={start} className={buttonPrimary}>Scan Again</button>
-            <button type="button" onClick={onManual} className={buttonSecondary}>Manual Entry</button>
-          </div>
-        </Panel>
-      )}
-
-      {product && scaled && (
-        <Panel title="Product Details">
-          <div className="space-y-1">
-            <h2 className="text-xl font-black">{product.name}</h2>
-            <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">{product.brand || 'Brand unavailable'} · {product.servingSize || 'Serving size unavailable'}</p>
-            <p className="text-xs font-bold uppercase text-slate-400 dark:text-slate-500">Barcode {product.barcode}</p>
-          </div>
-          <div className="mt-4 flex gap-2">
-            {multipliers.map((value) => <button key={value} type="button" onClick={() => setMultiplier(value)} aria-pressed={multiplier === value} className={`min-h-11 rounded-xl px-3 py-2 text-sm font-bold transition active:scale-95 ${multiplier === value ? 'bg-salt-700 text-white dark:bg-salt-500 dark:text-slate-950' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'}`}>{value}x</button>)}
-          </div>
-          <NutrientGrid nutrients={scaled} availability={product.availableNutrients} />
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <button type="button" onClick={() => onAdd({ ...scaled, name: product.name, brand: product.brand, servingSize: product.servingSize, fluidsOz: 0, source: 'scanner', barcode: product.barcode, multiplier })} className="min-h-12 rounded-xl bg-berry px-4 py-3 font-bold text-white shadow-soft transition active:scale-[0.99]">Add To Today</button>
-            <button type="button" onClick={start} className={buttonSecondary}>Scan Again</button>
-          </div>
-        </Panel>
-      )}
-    </section>
-  );
+  return <section className="space-y-5"><Panel title="Barcode Scanner"><div className="rounded-xl border border-salt-100 bg-salt-50 p-3 text-sm font-semibold text-salt-900 dark:border-salt-500/20 dark:bg-salt-500/10 dark:text-salt-100">Tap Start Scanner to request camera access. For iPhone Safari, use the HTTPS site or installed PWA and allow camera permission when prompted.</div><div id="reader" className="mt-4 min-h-56 overflow-hidden rounded-2xl bg-slate-900 ring-1 ring-slate-200 dark:ring-slate-700" /><ScannerStatus state={lookupState} status={status} /><div className="mt-4 grid grid-cols-2 gap-3"><button type="button" onClick={start} disabled={scanning || loading} className={buttonPrimary}>{lookupState === 'found' || lookupState === 'not-found' || lookupState === 'api-error' ? 'Scan Again' : 'Start Scanner'}</button><button type="button" onClick={() => void stop()} disabled={!scanning} className={buttonSecondary}>Stop Scanner</button></div><form onSubmit={submitManualBarcode} className="mt-4 grid grid-cols-[1fr_auto] gap-2" aria-label="Manual barcode lookup"><input value={manualBarcode} onChange={(event) => setManualBarcode(event.target.value)} inputMode="numeric" autoComplete="off" aria-label="Barcode number" placeholder="Enter barcode" className={inputClass} /><button type="submit" disabled={loading || !manualBarcode.trim()} className="grid h-12 w-12 place-items-center rounded-xl bg-slate-900 text-white transition active:scale-95 disabled:bg-slate-300 dark:bg-slate-100 dark:text-slate-950 dark:disabled:bg-slate-700" aria-label="Look up barcode">{loading ? <Loader2 className="animate-spin" size={20} aria-hidden="true" /> : <Search size={20} aria-hidden="true" />}</button></form><button type="button" onClick={onManual} className="mt-3 w-full min-h-12 rounded-xl bg-slate-100 px-4 py-3 font-bold text-slate-700 transition active:scale-[0.99] dark:bg-slate-800 dark:text-slate-100">Manual nutrition entry</button></Panel>{(lookupState === 'not-found' || lookupState === 'api-error') && <Panel title={lookupState === 'not-found' ? 'Product Not Found' : 'Lookup Error'}><p className="text-sm font-semibold text-slate-600 dark:text-slate-300">{lookupState === 'not-found' ? `${barcode || 'That barcode'} was not found in Open Food Facts.` : 'Open Food Facts could not be reached or returned an error.'}</p><div className="mt-4 grid grid-cols-2 gap-3"><button type="button" onClick={start} className={buttonPrimary}>Scan Again</button><button type="button" onClick={onManual} className={buttonSecondary}>Manual Entry</button></div></Panel>}{product && scaled && productLog && <Panel title="Product Details"><div className="space-y-1"><h2 className="text-xl font-black">{product.name}</h2><p className="text-sm font-semibold text-slate-500 dark:text-slate-400">{product.brand || 'Brand unavailable'} · {product.servingSize || 'Serving size unavailable'}</p><p className="text-xs font-bold uppercase text-slate-400 dark:text-slate-500">Barcode {product.barcode}</p></div><div className="mt-4 flex gap-2">{multipliers.map((value) => <button key={value} type="button" onClick={() => setMultiplier(value)} aria-pressed={multiplier === value} className={`min-h-11 rounded-xl px-3 py-2 text-sm font-bold transition active:scale-95 ${multiplier === value ? 'bg-salt-700 text-white dark:bg-salt-500 dark:text-slate-950' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'}`}>{value}x</button>)}</div><NutrientGrid nutrients={scaled} availability={product.availableNutrients} /><div className="mt-4 grid gap-3 sm:grid-cols-3"><button type="button" onClick={() => onAdd(productLog)} className="min-h-12 rounded-xl bg-berry px-4 py-3 font-bold text-white shadow-soft transition active:scale-[0.99]">Add To Today</button><button type="button" onClick={() => onSaveFood(productLog)} className={buttonSecondary}>Save Food</button><button type="button" onClick={start} className={buttonSecondary}>Scan Again</button></div></Panel>}</section>;
 }
+
+const inputClass = 'mt-1 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none transition focus:border-salt-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-500';
 
 function ScannerStatus({ state, status }: { state: LookupState; status: string }) {
   const isError = state === 'api-error' || state === 'camera-error' || state === 'not-found';
   const isLoading = state === 'loading' || state === 'permission';
-  return (
-    <div role={isError ? 'alert' : 'status'} className={`mt-3 flex items-start gap-2 rounded-xl p-3 text-sm font-semibold ${isError ? 'bg-rose-50 text-rose-950 dark:bg-rose-500/15 dark:text-rose-100' : 'bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>
-      {isLoading ? <Loader2 className="mt-0.5 shrink-0 animate-spin" size={18} aria-hidden="true" /> : isError ? <AlertCircle className="mt-0.5 shrink-0" size={18} aria-hidden="true" /> : <CheckCircle2 className="mt-0.5 shrink-0 text-salt-700 dark:text-salt-400" size={18} aria-hidden="true" />}
-      <p>{status}</p>
-    </div>
-  );
+  return <div role={isError ? 'alert' : 'status'} className={`mt-3 flex items-start gap-2 rounded-xl p-3 text-sm font-semibold ${isError ? 'bg-rose-50 text-rose-950 dark:bg-rose-500/15 dark:text-rose-100' : 'bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>{isLoading ? <Loader2 className="mt-0.5 shrink-0 animate-spin" size={18} aria-hidden="true" /> : isError ? <AlertCircle className="mt-0.5 shrink-0" size={18} aria-hidden="true" /> : <CheckCircle2 className="mt-0.5 shrink-0 text-salt-700 dark:text-salt-400" size={18} aria-hidden="true" />}<p>{status}</p></div>;
 }
 
-function ManualEntry({ onAdd }: { onAdd: (entry: Omit<FoodLog, 'id' | 'createdAt'>) => void }) {
+function ManualEntry({ onAdd }: { onAdd: (entry: Omit<FoodLog, 'id' | 'createdAt'>, saveToFavorites?: boolean) => void }) {
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    onAdd({ ...emptyNutrients, name: textField(form, 'name') || 'Manual entry', sodiumMg: numberField(form, 'sodiumMg'), potassiumMg: numberField(form, 'potassiumMg'), magnesiumMg: numberField(form, 'magnesiumMg'), calciumMg: numberField(form, 'calciumMg'), fluidsOz: numberField(form, 'fluidsOz'), notes: textField(form, 'notes'), source: 'manual', multiplier: 1 });
+    onAdd({ ...emptyNutrients, name: textField(form, 'name') || 'Manual entry', brand: textField(form, 'brand'), servingSize: textField(form, 'servingSize'), category: textField(form, 'category') as FoodCategory, sodiumMg: numberField(form, 'sodiumMg'), potassiumMg: numberField(form, 'potassiumMg'), magnesiumMg: numberField(form, 'magnesiumMg'), calciumMg: numberField(form, 'calciumMg'), carbohydratesG: numberField(form, 'carbohydratesG'), sugarsG: numberField(form, 'sugarsG'), proteinG: numberField(form, 'proteinG'), caffeineMg: numberField(form, 'caffeineMg'), fluidsOz: numberField(form, 'fluidsOz'), notes: textField(form, 'notes'), source: 'manual', multiplier: 1 }, form.get('saveFavorite') === 'on');
     event.currentTarget.reset();
   };
-  return <EntryForm title="Manual Nutrition Entry" onSubmit={submit} fields={[['name', 'Product name', 'text'], ['sodiumMg', 'Sodium mg', 'number'], ['potassiumMg', 'Potassium mg', 'number'], ['magnesiumMg', 'Magnesium mg', 'number'], ['calciumMg', 'Calcium mg', 'number'], ['fluidsOz', 'Fluids oz', 'number']]} includeNotes />;
+  return <Panel title="Food & Nutrition Entry"><form onSubmit={submit} className="space-y-4"><Input name="name" label="Food or meal name" type="text" /><Input name="brand" label="Brand or restaurant" type="text" /><Input name="servingSize" label="Serving size" type="text" /><SelectField name="category" label="Food type" options={foodCategories} /><div className="grid grid-cols-2 gap-3"><Input name="sodiumMg" label="Sodium mg" type="number" /><Input name="potassiumMg" label="Potassium mg" type="number" /><Input name="magnesiumMg" label="Magnesium mg" type="number" /><Input name="calciumMg" label="Calcium mg" type="number" /><Input name="carbohydratesG" label="Carbs g" type="number" /><Input name="sugarsG" label="Sugars g" type="number" /><Input name="proteinG" label="Protein g" type="number" /><Input name="caffeineMg" label="Caffeine mg" type="number" /></div><Input name="fluidsOz" label="Fluids oz" type="number" /><TextArea name="notes" label="Notes" /><label className="flex items-center gap-3 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700 dark:bg-slate-800 dark:text-slate-200"><input name="saveFavorite" type="checkbox" className="h-5 w-5 accent-salt-700" /> Save as reusable favorite</label><button className={buttonPrimary}>Add To Today</button></form></Panel>;
+}
+
+function SavedFoodsPage({ savedFoods, setSavedFoods, onAdd }: { savedFoods: SavedFood[]; setSavedFoods: (foods: SavedFood[]) => void; onAdd: (food: SavedFood) => void }) {
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState<SavedFood | null>(null);
+  const filtered = savedFoods.filter((food) => `${food.name} ${food.brand ?? ''} ${food.category ?? ''}`.toLowerCase().includes(query.toLowerCase()));
+  const deleteFood = (id: string) => setSavedFoods(savedFoods.filter((food) => food.id !== id));
+  const saveEdit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editing) return;
+    const form = new FormData(event.currentTarget);
+    const next: SavedFood = { ...editing, name: textField(form, 'name') || editing.name, brand: textField(form, 'brand'), servingSize: textField(form, 'servingSize'), category: textField(form, 'category') as FoodCategory, sodiumMg: numberField(form, 'sodiumMg'), potassiumMg: numberField(form, 'potassiumMg'), magnesiumMg: numberField(form, 'magnesiumMg'), calciumMg: numberField(form, 'calciumMg'), carbohydratesG: numberField(form, 'carbohydratesG'), sugarsG: numberField(form, 'sugarsG'), proteinG: numberField(form, 'proteinG'), caffeineMg: numberField(form, 'caffeineMg'), fluidsOz: numberField(form, 'fluidsOz'), notes: textField(form, 'notes'), updatedAt: new Date().toISOString() };
+    setSavedFoods(savedFoods.map((food) => food.id === next.id ? next : food));
+    setEditing(null);
+  };
+  return <section className="space-y-5"><Panel title="Saved / Frequent Foods"><label className="sr-only" htmlFor="saved-search">Search saved foods</label><input id="saved-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search saved foods" className={inputClass} />{filtered.length === 0 ? <div className="mt-4"><Empty text="No saved foods yet." /></div> : <div className="mt-4 space-y-3">{filtered.map((food) => <div key={food.id} className="rounded-xl border border-slate-100 p-3 dark:border-slate-800"><div className="flex items-start justify-between gap-3"><div><p className="font-black">{food.name}</p><p className="text-sm font-semibold text-slate-500 dark:text-slate-400">{food.category ?? 'custom'} · {fmt(food.sodiumMg)} mg sodium</p></div><div className="flex gap-2"><button type="button" onClick={() => onAdd(food)} className="grid h-11 w-11 place-items-center rounded-xl bg-salt-700 text-white dark:bg-salt-500 dark:text-slate-950" aria-label={`Add ${food.name} to today`}><Plus size={18} /></button><button type="button" onClick={() => setEditing(food)} className="grid h-11 w-11 place-items-center rounded-xl bg-slate-100 dark:bg-slate-800" aria-label={`Edit ${food.name}`}><Pencil size={18} /></button><button type="button" onClick={() => deleteFood(food.id)} className="grid h-11 w-11 place-items-center rounded-xl bg-rose-50 text-rose-800 dark:bg-rose-500/15 dark:text-rose-200" aria-label={`Delete ${food.name}`}><Trash2 size={18} /></button></div></div></div>)}</div>}</Panel>{editing && <Panel title="Edit Saved Food"><FoodEditForm food={editing} onSubmit={saveEdit} onCancel={() => setEditing(null)} /></Panel>}</section>;
+}
+
+function FoodEditForm({ food, onSubmit, onCancel }: { food: SavedFood; onSubmit: (event: React.FormEvent<HTMLFormElement>) => void; onCancel: () => void }) {
+  return <form onSubmit={onSubmit} className="space-y-4"><Input name="name" label="Name" type="text" defaultValue={food.name} /><Input name="brand" label="Brand or restaurant" type="text" defaultValue={food.brand} /><Input name="servingSize" label="Serving size" type="text" defaultValue={food.servingSize} /><SelectField name="category" label="Food type" options={foodCategories} defaultValue={food.category} /><div className="grid grid-cols-2 gap-3"><Input name="sodiumMg" label="Sodium mg" type="number" defaultValue={food.sodiumMg} /><Input name="potassiumMg" label="Potassium mg" type="number" defaultValue={food.potassiumMg} /><Input name="magnesiumMg" label="Magnesium mg" type="number" defaultValue={food.magnesiumMg} /><Input name="calciumMg" label="Calcium mg" type="number" defaultValue={food.calciumMg} /><Input name="carbohydratesG" label="Carbs g" type="number" defaultValue={food.carbohydratesG} /><Input name="sugarsG" label="Sugars g" type="number" defaultValue={food.sugarsG} /><Input name="proteinG" label="Protein g" type="number" defaultValue={food.proteinG} /><Input name="caffeineMg" label="Caffeine mg" type="number" defaultValue={food.caffeineMg} /></div><Input name="fluidsOz" label="Fluids oz" type="number" defaultValue={food.fluidsOz} /><TextArea name="notes" label="Notes" defaultValue={food.notes} /><div className="grid grid-cols-2 gap-3"><button className={buttonPrimary}>Save Changes</button><button type="button" onClick={onCancel} className={buttonSecondary}>Cancel</button></div></form>;
 }
 
 function SymptomTracker({ onAdd, logs }: { onAdd: (entry: Omit<SymptomLog, 'id' | 'createdAt'>) => void; logs: SymptomLog[] }) {
-  const submit = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    onAdd({ dizziness: numberField(form, 'dizziness'), fatigue: numberField(form, 'fatigue'), brainFog: numberField(form, 'brainFog'), nausea: numberField(form, 'nausea'), pain: numberField(form, 'pain'), heartRate: numberField(form, 'heartRate'), standingTolerance: numberField(form, 'standingTolerance'), notes: textField(form, 'notes') });
-    event.currentTarget.reset();
-  };
-  return (
-    <section className="space-y-5">
-      <Panel title="Symptom Tracker">
-        <form onSubmit={submit} className="space-y-4">
-          {([['dizziness', 'Dizziness'], ['fatigue', 'Fatigue'], ['brainFog', 'Brain fog'], ['nausea', 'Nausea'], ['pain', 'Pain']] as const).map(([name, label]) => <RangeField key={name} name={name} label={label} />)}
-          <Input name="heartRate" label="Heart rate" type="number" />
-          <Input name="standingTolerance" label="Standing tolerance minutes" type="number" />
-          <TextArea name="notes" label="Notes" />
-          <button className={buttonPrimary}>Save Check-in</button>
-        </form>
-      </Panel>
-      <Panel title="Today">{logs.length === 0 ? <Empty text="No symptoms logged yet." /> : logs.map((log) => <SymptomRow key={log.id} log={log} />)}</Panel>
-    </section>
-  );
+  const submit = (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); onAdd({ dizziness: numberField(form, 'dizziness'), fatigue: numberField(form, 'fatigue'), brainFog: numberField(form, 'brainFog'), nausea: numberField(form, 'nausea'), pain: numberField(form, 'pain'), heartRate: numberField(form, 'heartRate'), standingTolerance: numberField(form, 'standingTolerance'), notes: textField(form, 'notes') }); event.currentTarget.reset(); };
+  return <section className="space-y-5"><Panel title="Symptom Tracker"><form onSubmit={submit} className="space-y-4">{([['dizziness', 'Dizziness'], ['fatigue', 'Fatigue'], ['brainFog', 'Brain fog'], ['nausea', 'Nausea'], ['pain', 'Pain']] as const).map(([name, label]) => <RangeField key={name} name={name} label={label} />)}<Input name="heartRate" label="Heart rate" type="number" /><Input name="standingTolerance" label="Standing tolerance minutes" type="number" /><TextArea name="notes" label="Notes" /><button className={buttonPrimary}>Save Check-in</button></form></Panel><Panel title="Today">{logs.length === 0 ? <Empty text="No symptoms logged yet." /> : logs.map((log) => <SymptomRow key={log.id} log={log} />)}</Panel></section>;
 }
 
 function Insights({ foods, symptoms, settings }: { foods: FoodLog[]; symptoms: SymptomLog[]; settings: Settings }) {
-  const last7 = useMemo(() => {
-    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    return foods.filter((food) => new Date(food.createdAt).getTime() >= cutoff);
-  }, [foods]);
+  const days = useMemo(() => Array.from(new Set([...foods.map((food) => dateKey(food.createdAt)), ...symptoms.map((log) => dateKey(log.createdAt))])).sort().reverse(), [foods, symptoms]);
+  const [selectedDate, setSelectedDate] = useState(days[0] ?? dateKey(new Date().toISOString()));
+  const selectedFoods = foods.filter((food) => dateKey(food.createdAt) === selectedDate);
+  const selectedSymptoms = symptoms.filter((log) => dateKey(log.createdAt) === selectedDate);
+  const selectedTotals = totalsFor(selectedFoods);
+  const avgSymptom = selectedSymptoms.length ? selectedSymptoms.reduce((sum, log) => sum + log.dizziness + log.fatigue + log.brainFog + log.nausea + log.pain, 0) / (selectedSymptoms.length * 5) : 0;
+  const last7 = useMemo(() => foods.filter((food) => new Date(food.createdAt).getTime() >= Date.now() - 7 * 24 * 60 * 60 * 1000), [foods]);
   const avgSodium = last7.length ? last7.reduce((sum, food) => sum + food.sodiumMg, 0) / 7 : 0;
   const avgFluids = last7.length ? last7.reduce((sum, food) => sum + food.fluidsOz, 0) / 7 : 0;
-  const recentSymptoms = symptoms.slice(0, 5);
-  return (
-    <section className="space-y-5">
-      <div className="grid grid-cols-2 gap-3">
-        <Metric label="7-day sodium avg" value={`${fmt(avgSodium)} mg`} />
-        <Metric label="7-day fluid avg" value={`${fmt(avgFluids)} oz`} />
-      </div>
-      <Panel title="Pattern Notes">
-        <ul className="space-y-3 text-sm font-semibold text-slate-600 dark:text-slate-300">
-          <li className="flex gap-2"><CheckCircle2 className="shrink-0 text-salt-700 dark:text-salt-400" size={20} aria-hidden="true" /> Sodium average is {Math.round((avgSodium / settings.sodiumGoalMg) * 100) || 0}% of your saved goal.</li>
-          <li className="flex gap-2"><CheckCircle2 className="shrink-0 text-salt-700 dark:text-salt-400" size={20} aria-hidden="true" /> Fluid average is {Math.round((avgFluids / settings.fluidGoalOz) * 100) || 0}% of your saved goal.</li>
-          <li className="flex gap-2"><CheckCircle2 className="shrink-0 text-salt-700 dark:text-salt-400" size={20} aria-hidden="true" /> Log symptoms alongside meals to spot timing patterns over time.</li>
-        </ul>
-      </Panel>
-      <Panel title="Recent Symptoms">{recentSymptoms.length === 0 ? <Empty text="No symptom history yet." /> : recentSymptoms.map((log) => <SymptomRow key={log.id} log={log} />)}</Panel>
-    </section>
-  );
+  return <section className="space-y-5"><div className="grid grid-cols-2 gap-3"><Metric label="7-day sodium avg" value={`${fmt(avgSodium)} mg`} /><Metric label="7-day fluid avg" value={`${fmt(avgFluids)} oz`} /></div><Panel title="Daily Food History"><label className="text-sm font-bold text-slate-600 dark:text-slate-300">View day</label><input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} className={inputClass} /><div className="mt-4 grid grid-cols-3 gap-3"><Metric label="Sodium" value={`${fmt(selectedTotals.sodiumMg)} mg`} /><Metric label="Fluids" value={`${fmt(selectedTotals.fluidsOz)} oz`} /><Metric label="Symptom avg" value={avgSymptom ? `${avgSymptom.toFixed(1)}/10` : 'None'} /></div><div className="mt-4">{selectedFoods.length === 0 ? <Empty text="No foods logged for this day." /> : selectedFoods.map((food) => <FoodRow key={food.id} food={food} />)}</div></Panel><Panel title="Food + Symptom Pattern"><p className="text-sm font-semibold text-slate-600 dark:text-slate-300">On {selectedDate}, sodium was {Math.round((selectedTotals.sodiumMg / settings.sodiumGoalMg) * 100) || 0}% of goal and fluids were {Math.round((selectedTotals.fluidsOz / settings.fluidGoalOz) * 100) || 0}% of goal. Compare this with the symptom average above to notice day-level patterns over time.</p></Panel></section>;
 }
 
 function HelpNow({ settings }: { settings: Settings }) {
-  return (
-    <section className="space-y-5">
-      <div role="note" className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-rose-950 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-100"><div className="flex items-start gap-3"><XCircle className="shrink-0" aria-hidden="true" /><p className="font-bold">This app is not medical advice and does not diagnose, treat, or replace care from a clinician.</p></div></div>
-      <Panel title="POTS Flare Checklist"><Checklist items={['Sit or lie down safely.', 'Elevate legs if that usually helps you.', 'Sip fluids and use your clinician-approved electrolyte or sodium plan.', 'Cool down with shade, fan, cool cloth, or lighter layers.', 'Avoid driving or standing alone until symptoms settle.', 'Contact your support person if you feel unsafe.']} /></Panel>
-      <Panel title="Emergency Warning Signs"><Checklist urgent items={['Chest pain, severe shortness of breath, or fainting with injury.', 'New weakness, trouble speaking, confusion, or one-sided symptoms.', 'Heart rate or symptoms that feel dangerous or unusual for you.', 'Signs of severe dehydration or inability to keep fluids down.', 'Any symptom your doctor told you requires urgent care.']} /></Panel>
-      <Panel title="Contacts"><p className="font-semibold text-slate-600 dark:text-slate-300">Emergency: {settings.emergencyContact || 'Not set'}</p><p className="mt-2 font-semibold text-slate-600 dark:text-slate-300">Doctor: {settings.doctorContact || 'Not set'}</p></Panel>
-    </section>
-  );
+  return <section className="space-y-5"><div role="note" className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-rose-950 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-100"><div className="flex items-start gap-3"><XCircle className="shrink-0" aria-hidden="true" /><p className="font-bold">This app is not medical advice and does not diagnose, treat, or replace care from a clinician.</p></div></div><Panel title="POTS Flare Checklist"><Checklist items={['Sit or lie down safely.', 'Elevate legs if that usually helps you.', 'Sip fluids and use your clinician-approved electrolyte or sodium plan.', 'Cool down with shade, fan, cool cloth, or lighter layers.', 'Avoid driving or standing alone until symptoms settle.', 'Contact your support person if you feel unsafe.']} /></Panel><Panel title="Emergency Warning Signs"><Checklist urgent items={['Chest pain, severe shortness of breath, or fainting with injury.', 'New weakness, trouble speaking, confusion, or one-sided symptoms.', 'Heart rate or symptoms that feel dangerous or unusual for you.', 'Signs of severe dehydration or inability to keep fluids down.', 'Any symptom your doctor told you requires urgent care.']} /><p className="mt-4 text-sm font-bold text-rose-700 dark:text-rose-200">If symptoms feel dangerous, call local emergency services. This checklist is educational only.</p></Panel><Panel title="POTS Resources"><ResourceList /></Panel><Panel title="Contacts"><p className="font-semibold text-slate-600 dark:text-slate-300">Emergency: {settings.emergencyContact || 'Not set'}</p><p className="mt-2 font-semibold text-slate-600 dark:text-slate-300">Doctor: {settings.doctorContact || 'Not set'}</p></Panel></section>;
+}
+
+function ResourceList() {
+  const resources = [{ name: 'Dysautonomia International', url: 'https://www.dysautonomiainternational.org/' }, { name: 'Standing Up to POTS', url: 'https://www.standinguptopots.org/' }, { name: 'The Ehlers-Danlos Society', url: 'https://www.ehlers-danlos.com/' }, { name: 'POTS UK', url: 'https://www.potsuk.org/' }, { name: 'Facebook support group placeholder', url: '#' }, { name: 'Local support group placeholder', url: '#' }];
+  return <div className="space-y-3"><p className="text-sm font-semibold text-slate-600 dark:text-slate-300">Patient education links are provided for learning and peer support only. They are not emergency care or personalized medical guidance.</p>{resources.map((resource) => <a key={resource.name} href={resource.url} target={resource.url === '#' ? undefined : '_blank'} rel="noreferrer" className="block rounded-xl bg-slate-50 p-3 font-bold text-salt-800 dark:bg-slate-800 dark:text-salt-200">{resource.name}</a>)}</div>;
+}
+
+function CommunityChat() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [profile, setProfile] = useState<MemberProfile | null>(null);
+  const [rooms, setRooms] = useState<ChatRoom[]>([]);
+  const [selectedRoom, setSelectedRoom] = useState<ChatRoom | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [status, setStatus] = useState('');
+  const user = session?.user ?? null;
+  const verified = Boolean(user?.email_confirmed_at);
+
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => { if (user && verified) void loadProfile(user); else setProfile(null); }, [user?.id, verified]);
+  useEffect(() => { if (user && verified && profile?.username) void loadRooms(); }, [user?.id, verified, profile?.username]);
+  useEffect(() => { if (selectedRoom && user && verified && profile?.username) void loadMessages(selectedRoom.id); }, [selectedRoom?.id, user?.id, verified, profile?.username]);
+
+  const client = supabase;
+  const loadProfile = async (currentUser: User) => {
+    if (!client) return;
+    const { data } = await client.from('profiles').select('id, username, created_at').eq('id', currentUser.id).maybeSingle();
+    setProfile((data as MemberProfile | null) ?? { id: currentUser.id, username: null });
+  };
+  const loadRooms = async () => {
+    if (!client) return;
+    const { data, error } = await client.from('chat_rooms').select('id, slug, name, description').order('name');
+    if (error) { setStatus('Run the Supabase SQL setup to create chat rooms.'); return; }
+    const nextRooms = (data ?? []) as ChatRoom[];
+    setRooms(nextRooms);
+    setSelectedRoom((room) => room ?? nextRooms[0] ?? null);
+  };
+  const loadMessages = async (roomId: string) => {
+    if (!client) return;
+    const { data, error } = await client.from('chat_messages').select('id, room_id, user_id, username, body, created_at').eq('room_id', roomId).order('created_at', { ascending: true }).limit(100);
+    if (error) { setStatus('Could not load messages. Check Supabase policies and setup.'); return; }
+    setMessages((data ?? []) as ChatMessage[]);
+  };
+  const signUp = async (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!client) return; const form = new FormData(event.currentTarget); const { error } = await client.auth.signUp({ email: textField(form, 'email'), password: textField(form, 'password') }); setStatus(error ? error.message : 'Check your email to verify your account before posting.'); };
+  const login = async (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!client) return; const form = new FormData(event.currentTarget); const { error } = await client.auth.signInWithPassword({ email: textField(form, 'email'), password: textField(form, 'password') }); setStatus(error ? error.message : 'Logged in.'); };
+  const logout = async () => { if (!client) return; await client.auth.signOut(); setProfile(null); setRooms([]); setMessages([]); };
+  const createUsername = async (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!client || !user || profile?.username) return; const username = textField(new FormData(event.currentTarget), 'username'); const { error } = await client.from('profiles').upsert({ id: user.id, username }, { onConflict: 'id' }); if (error) setStatus(error.message); else await loadProfile(user); };
+  const sendMessage = async (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!client || !user || !selectedRoom || !profile?.username) return; const form = new FormData(event.currentTarget); const body = textField(form, 'body'); if (!body) return; const { error } = await client.from('chat_messages').insert({ room_id: selectedRoom.id, user_id: user.id, username: profile.username, body }); if (error) setStatus(error.message); else { event.currentTarget.reset(); await loadMessages(selectedRoom.id); } };
+  const deleteMessage = async (message: ChatMessage) => { if (!client || !selectedRoom) return; const { error } = await client.from('chat_messages').delete().eq('id', message.id); if (error) setStatus(error.message); else await loadMessages(selectedRoom.id); };
+  const reportMessage = async (message: ChatMessage) => { if (!client || !user) return; const { error } = await client.from('message_reports').insert({ message_id: message.id, reporter_id: user.id, reason: 'Reported from app' }); setStatus(error ? error.message : 'Message reported. Thank you.'); };
+
+  if (!isSupabaseConfigured) return <Panel title="Community Setup Needed"><p className="font-semibold text-slate-600 dark:text-slate-300">Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to enable Community Chat. The rest of the app works without login.</p></Panel>;
+  if (!user) return <section className="space-y-5"><Panel title="Community Rules"><CommunityRules /></Panel><AuthForms onLogin={login} onSignUp={signUp} status={status} /></section>;
+  if (!verified) return <Panel title="Email Verification Required"><p className="font-semibold text-slate-600 dark:text-slate-300">Please verify your email before creating a username or posting. Your email is never shown publicly.</p><button type="button" onClick={logout} className={`${buttonSecondary} mt-4`}>Log out</button></Panel>;
+  if (!profile?.username) return <Panel title="Create Display Username"><p className="mb-4 text-sm font-semibold text-slate-600 dark:text-slate-300">Choose one public display username. It can only be set once. Do not use your real name unless you want to.</p><form onSubmit={createUsername} className="space-y-4"><Input name="username" label="Display username" type="text" /><button className={buttonPrimary}>Create Username</button></form>{status && <p className="mt-3 text-sm font-bold text-rose-700 dark:text-rose-200">{status}</p>}</Panel>;
+
+  return <section className="space-y-5"><Panel title="Community Rules"><CommunityRules /><div className="mt-4 flex items-center justify-between gap-3"><p className="text-sm font-bold text-slate-600 dark:text-slate-300">Posting as {profile.username}</p><button type="button" onClick={logout} className={buttonSecondary}>Log out</button></div></Panel><Panel title="Chat Rooms"><div className="flex gap-2 overflow-x-auto pb-2">{(rooms.length ? rooms : fallbackRooms.map((name, index) => ({ id: String(index), slug: name.toLowerCase().replaceAll(' ', '-'), name }))).map((room) => <button key={room.id} type="button" onClick={() => setSelectedRoom(room as ChatRoom)} className={`min-h-11 rounded-xl px-3 py-2 text-sm font-bold ${selectedRoom?.id === room.id ? 'bg-salt-700 text-white dark:bg-salt-500 dark:text-slate-950' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'}`}>{room.name}</button>)}</div></Panel><Panel title={selectedRoom?.name ?? 'Messages'}>{status && <p className="mb-3 text-sm font-bold text-rose-700 dark:text-rose-200">{status}</p>}<div className="space-y-3">{messages.length === 0 ? <Empty text="No messages yet." /> : messages.map((message) => <div key={message.id} className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800"><div className="flex items-start justify-between gap-3"><div><p className="font-black">{message.username}</p><p className="text-xs font-semibold text-slate-500 dark:text-slate-400">{new Date(message.created_at).toLocaleString()}</p></div><div className="flex gap-2"><button type="button" onClick={() => reportMessage(message)} className="text-xs font-bold text-amber-700 dark:text-amber-300">Report</button>{message.user_id === user.id && <button type="button" onClick={() => deleteMessage(message)} className="text-xs font-bold text-rose-700 dark:text-rose-300">Delete</button>}<button type="button" disabled className="text-xs font-bold text-slate-400">Admin delete</button></div></div><p className="mt-2 whitespace-pre-wrap text-sm font-semibold text-slate-700 dark:text-slate-200">{message.body}</p></div>)}</div><form onSubmit={sendMessage} className="mt-4 space-y-3"><TextArea name="body" label="Message" /><button className={buttonPrimary}>Send Message</button></form></Panel></section>;
+}
+
+function AuthForms({ onLogin, onSignUp, status }: { onLogin: (event: React.FormEvent<HTMLFormElement>) => void; onSignUp: (event: React.FormEvent<HTMLFormElement>) => void; status: string }) {
+  return <div className="grid gap-5 sm:grid-cols-2"><Panel title="Log In"><form onSubmit={onLogin} className="space-y-4"><Input name="email" label="Email" type="email" /><Input name="password" label="Password" type="password" /><button className={buttonPrimary}>Log In</button></form></Panel><Panel title="Sign Up"><form onSubmit={onSignUp} className="space-y-4"><Input name="email" label="Email" type="email" /><Input name="password" label="Password" type="password" /><button className={buttonPrimary}>Create Account</button></form>{status && <p className="mt-3 text-sm font-bold text-salt-700 dark:text-salt-300">{status}</p>}</Panel></div>;
+}
+
+function CommunityRules() {
+  return <div className="space-y-2 text-sm font-semibold text-slate-600 dark:text-slate-300"><p>Be kind, avoid medical directives, protect privacy, and do not share anyone's email or private details.</p><p>Abuse, harassment, spam, or dangerous advice may be reported. Moderation is minimal for now.</p></div>;
 }
 
 function SettingsPage({ settings, setSettings }: { settings: Settings; setSettings: (settings: Settings) => void }) {
   const [draft, setDraft] = useState(settings);
-  const save = (event: React.FormEvent) => {
-    event.preventDefault();
-    setSettings({ ...defaultSettings, ...draft, sodiumGoalMg: Number(draft.sodiumGoalMg) || 0, fluidGoalOz: Number(draft.fluidGoalOz) || 0 });
-  };
-  return (
-    <Panel title="Settings">
-      <form onSubmit={save} className="space-y-4">
-        <ControlledInput label="Daily sodium goal mg" value={draft.sodiumGoalMg} onChange={(value) => setDraft({ ...draft, sodiumGoalMg: Number(value) })} type="number" />
-        <ControlledInput label="Daily fluid goal oz" value={draft.fluidGoalOz} onChange={(value) => setDraft({ ...draft, fluidGoalOz: Number(value) })} type="number" />
-        <ControlledInput label="Emergency contact" value={draft.emergencyContact} onChange={(value) => setDraft({ ...draft, emergencyContact: value })} />
-        <ControlledInput label="Doctor contact" value={draft.doctorContact} onChange={(value) => setDraft({ ...draft, doctorContact: value })} />
-        <button className={buttonPrimary}>Save Settings</button>
-      </form>
-    </Panel>
-  );
-}
-
-function EntryForm({ title, onSubmit, fields, includeNotes }: { title: string; onSubmit: (event: React.FormEvent<HTMLFormElement>) => void; fields: [string, string, string][]; includeNotes?: boolean }) {
-  return <Panel title={title}><form onSubmit={onSubmit} className="space-y-4">{fields.map(([name, label, type]) => <Input key={name} name={name} label={label} type={type} />)}{includeNotes && <TextArea name="notes" label="Notes" />}<button className={buttonPrimary}>Add To Today</button></form></Panel>;
+  const save = (event: React.FormEvent) => { event.preventDefault(); setSettings({ ...defaultSettings, ...draft, sodiumGoalMg: Number(draft.sodiumGoalMg) || 0, fluidGoalOz: Number(draft.fluidGoalOz) || 0 }); };
+  return <Panel title="Settings"><form onSubmit={save} className="space-y-4"><ControlledInput label="Daily sodium goal mg" value={draft.sodiumGoalMg} onChange={(value) => setDraft({ ...draft, sodiumGoalMg: Number(value) })} type="number" /><ControlledInput label="Daily fluid goal oz" value={draft.fluidGoalOz} onChange={(value) => setDraft({ ...draft, fluidGoalOz: Number(value) })} type="number" /><ControlledInput label="Emergency contact" value={draft.emergencyContact} onChange={(value) => setDraft({ ...draft, emergencyContact: value })} /><ControlledInput label="Doctor contact" value={draft.doctorContact} onChange={(value) => setDraft({ ...draft, doctorContact: value })} /><button className={buttonPrimary}>Save Settings</button></form></Panel>;
 }
 
 function NutrientGrid({ nutrients, availability }: { nutrients: Nutrients; availability?: NutrientAvailability }) {
-  const nutrientRows: Array<[keyof Nutrients, string, string, number]> = [
-    ['sodiumMg', 'Sodium', 'mg', nutrients.sodiumMg],
-    ['potassiumMg', 'Potassium', 'mg', nutrients.potassiumMg],
-    ['magnesiumMg', 'Magnesium', 'mg', nutrients.magnesiumMg],
-    ['calciumMg', 'Calcium', 'mg', nutrients.calciumMg],
-    ['carbohydratesG', 'Carbs', 'g', nutrients.carbohydratesG],
-    ['sugarsG', 'Sugars', 'g', nutrients.sugarsG],
-    ['proteinG', 'Protein', 'g', nutrients.proteinG],
-    ['caffeineMg', 'Caffeine', 'mg', nutrients.caffeineMg]
-  ];
+  const nutrientRows: Array<[keyof Nutrients, string, string, number]> = [['sodiumMg', 'Sodium', 'mg', nutrients.sodiumMg], ['potassiumMg', 'Potassium', 'mg', nutrients.potassiumMg], ['magnesiumMg', 'Magnesium', 'mg', nutrients.magnesiumMg], ['calciumMg', 'Calcium', 'mg', nutrients.calciumMg], ['carbohydratesG', 'Carbs', 'g', nutrients.carbohydratesG], ['sugarsG', 'Sugars', 'g', nutrients.sugarsG], ['proteinG', 'Protein', 'g', nutrients.proteinG], ['caffeineMg', 'Caffeine', 'mg', nutrients.caffeineMg]];
   return <div className="mt-4 grid grid-cols-2 gap-3">{nutrientRows.map(([key, label, unit, value]) => { const isAvailable = availability?.[key] ?? true; const displayValue = isAvailable ? `${unit === 'g' ? value.toFixed(1) : fmt(value)} ${unit}` : 'Not listed'; return <Metric key={key} label={label} value={displayValue} muted={!isAvailable} />; })}</div>;
 }
 
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
-  return <section className="rounded-2xl bg-white p-4 shadow-soft transition-colors dark:bg-slate-900 dark:shadow-night"><h2 className="mb-4 text-lg font-black">{title}</h2>{children}</section>;
-}
-
-function Metric({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {
-  return <div className={`rounded-xl p-3 transition-colors ${muted ? 'bg-slate-50 dark:bg-slate-800/70' : 'bg-salt-50 dark:bg-salt-500/12'}`}><p className={`text-xs font-bold uppercase ${muted ? 'text-slate-400 dark:text-slate-500' : 'text-salt-900/70 dark:text-salt-100/75'}`}>{label}</p><p className={`mt-1 text-lg font-black ${muted ? 'text-slate-500 dark:text-slate-400' : 'text-salt-900 dark:text-salt-50'}`}>{value}</p></div>;
-}
-
-function FoodRow({ food }: { food: FoodLog }) {
-  return <div className="border-b border-slate-100 py-3 last:border-0 dark:border-slate-800"><div className="flex justify-between gap-3"><p className="font-bold">{food.name}</p><p className="font-black text-salt-900 dark:text-salt-300">{fmt(food.sodiumMg)} mg</p></div><p className="text-sm font-semibold text-slate-500 dark:text-slate-400">{food.brand || food.source} · {food.fluidsOz ? `${food.fluidsOz} oz fluids` : 'no fluids'}</p></div>;
-}
-
-function SymptomRow({ log }: { log: SymptomLog }) {
-  return <div className="border-b border-slate-100 py-3 last:border-0 dark:border-slate-800"><p className="font-bold">Dizziness {log.dizziness}/10 · Fatigue {log.fatigue}/10 · Brain fog {log.brainFog}/10</p><p className="text-sm font-semibold text-slate-500 dark:text-slate-400">HR {log.heartRate || 'n/a'} · Standing {log.standingTolerance || 0} min {log.notes ? `· ${log.notes}` : ''}</p></div>;
-}
-
-function Input({ name, label, type }: { name: string; label: string; type: string }) {
-  return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><input name={name} type={type} inputMode={type === 'number' ? 'decimal' : undefined} min={type === 'number' ? 0 : undefined} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none transition focus:border-salt-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" /></label>;
-}
-
-function ControlledInput({ label, value, onChange, type = 'text' }: { label: string; value: string | number; onChange: (value: string) => void; type?: string }) {
-  return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><input value={value} onChange={(event) => onChange(event.target.value)} type={type} inputMode={type === 'number' ? 'decimal' : undefined} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none transition focus:border-salt-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" /></label>;
-}
-
-function TextArea({ name, label }: { name: string; label: string }) {
-  return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><textarea name={name} rows={4} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none transition focus:border-salt-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" /></label>;
-}
-
-function RangeField({ name, label }: { name: string; label: string }) {
-  return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><input name={name} type="range" min="0" max="10" defaultValue="0" className="mt-2 h-8 w-full accent-salt-700 dark:accent-salt-500" /></label>;
-}
-
-function Checklist({ items, urgent = false }: { items: string[]; urgent?: boolean }) {
-  return <ul className="space-y-3">{items.map((item) => <li key={item} className="flex gap-2 text-sm font-semibold text-slate-700 dark:text-slate-300">{urgent ? <XCircle className="shrink-0 text-berry dark:text-rose-300" size={20} aria-hidden="true" /> : <CheckCircle2 className="shrink-0 text-salt-700 dark:text-salt-400" size={20} aria-hidden="true" />}{item}</li>)}</ul>;
-}
-
-function Empty({ text }: { text: string }) {
-  return <div role="status" className="rounded-xl bg-slate-50 p-4 text-center text-sm font-bold text-slate-500 dark:bg-slate-800/70 dark:text-slate-400">{text}</div>;
-}
+function Panel({ title, children }: { title: string; children: React.ReactNode }) { return <section className="rounded-2xl bg-white p-4 shadow-soft transition-colors dark:bg-slate-900 dark:shadow-night"><h2 className="mb-4 text-lg font-black">{title}</h2>{children}</section>; }
+function Metric({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) { return <div className={`rounded-xl p-3 transition-colors ${muted ? 'bg-slate-50 dark:bg-slate-800/70' : 'bg-salt-50 dark:bg-salt-500/12'}`}><p className={`text-xs font-bold uppercase ${muted ? 'text-slate-400 dark:text-slate-500' : 'text-salt-900/70 dark:text-salt-100/75'}`}>{label}</p><p className={`mt-1 text-lg font-black ${muted ? 'text-slate-500 dark:text-slate-400' : 'text-salt-900 dark:text-salt-50'}`}>{value}</p></div>; }
+function FoodRow({ food, onSave }: { food: FoodLog; onSave?: () => void }) { return <div className="border-b border-slate-100 py-3 last:border-0 dark:border-slate-800"><div className="flex justify-between gap-3"><div><p className="font-bold">{food.name}</p><p className="text-sm font-semibold text-slate-500 dark:text-slate-400">{food.category ?? food.source} · {food.brand || 'no brand'} · {food.fluidsOz ? `${food.fluidsOz} oz fluids` : 'no fluids'}</p></div><div className="text-right"><p className="font-black text-salt-900 dark:text-salt-300">{fmt(food.sodiumMg)} mg</p>{onSave && <button type="button" onClick={onSave} className="mt-1 text-xs font-bold text-salt-700 dark:text-salt-300">Save food</button>}</div></div></div>; }
+function SymptomRow({ log }: { log: SymptomLog }) { return <div className="border-b border-slate-100 py-3 last:border-0 dark:border-slate-800"><p className="font-bold">Dizziness {log.dizziness}/10 · Fatigue {log.fatigue}/10 · Brain fog {log.brainFog}/10</p><p className="text-sm font-semibold text-slate-500 dark:text-slate-400">HR {log.heartRate || 'n/a'} · Standing {log.standingTolerance || 0} min {log.notes ? `· ${log.notes}` : ''}</p></div>; }
+function Input({ name, label, type, defaultValue }: { name: string; label: string; type: string; defaultValue?: string | number }) { return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><input name={name} type={type} defaultValue={defaultValue} inputMode={type === 'number' ? 'decimal' : undefined} min={type === 'number' ? 0 : undefined} className={inputClass} /></label>; }
+function ControlledInput({ label, value, onChange, type = 'text' }: { label: string; value: string | number; onChange: (value: string) => void; type?: string }) { return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><input value={value} onChange={(event) => onChange(event.target.value)} type={type} inputMode={type === 'number' ? 'decimal' : undefined} className={inputClass} /></label>; }
+function TextArea({ name, label, defaultValue }: { name: string; label: string; defaultValue?: string }) { return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><textarea name={name} rows={4} defaultValue={defaultValue} className={inputClass} /></label>; }
+function SelectField({ name, label, options, defaultValue }: { name: string; label: string; options: Array<{ value: FoodCategory; label: string }>; defaultValue?: FoodCategory }) { return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><select name={name} defaultValue={defaultValue ?? 'custom'} className={inputClass}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>; }
+function RangeField({ name, label }: { name: string; label: string }) { return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><input name={name} type="range" min="0" max="10" defaultValue="0" className="mt-2 h-8 w-full accent-salt-700 dark:accent-salt-500" /></label>; }
+function Checklist({ items, urgent = false }: { items: string[]; urgent?: boolean }) { return <ul className="space-y-3">{items.map((item) => <li key={item} className="flex gap-2 text-sm font-semibold text-slate-700 dark:text-slate-300">{urgent ? <XCircle className="shrink-0 text-berry dark:text-rose-300" size={20} aria-hidden="true" /> : <CheckCircle2 className="shrink-0 text-salt-700 dark:text-salt-400" size={20} aria-hidden="true" />}{item}</li>)}</ul>; }
+function Empty({ text }: { text: string }) { return <div role="status" className="rounded-xl bg-slate-50 p-4 text-center text-sm font-bold text-slate-500 dark:bg-slate-800/70 dark:text-slate-400">{text}</div>; }
 
 export default App;
