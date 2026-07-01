@@ -56,6 +56,9 @@ const produceItems: ProduceItem[] = [
   { id: 'kale-cup', name: 'Kale', servingSize: '1 cup chopped raw', category: 'vegetable', sodiumMg: 19, potassiumMg: 79, magnesiumMg: 7, calciumMg: 53, carbohydratesG: 0.9, sugarsG: 0.2, proteinG: 0.6, caffeineMg: 0, fluidsOz: 0.6, notes: 'USDA-style estimate for one cup chopped raw kale.', tags: ['vegetable', 'calcium'] }
 ];
 
+const inputClass = 'mt-1 min-h-12 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base font-semibold text-slate-900 outline-none transition focus:border-salt-500 focus:ring-4 focus:ring-salt-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:ring-salt-500/20';
+const buttonPrimary = 'min-h-12 rounded-xl bg-salt-700 px-4 py-3 text-sm font-black text-white transition hover:bg-salt-800 dark:bg-salt-500 dark:text-slate-950 dark:hover:bg-salt-400';
+const buttonSecondary = 'min-h-12 rounded-xl bg-slate-100 px-4 py-3 text-sm font-black text-slate-700 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700';
 const fmt = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1);
 const numberField = (form: FormData, key: string) => Math.max(0, Number(form.get(key)) || 0);
 const textField = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
