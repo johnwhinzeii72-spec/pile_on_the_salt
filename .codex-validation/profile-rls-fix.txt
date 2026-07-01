@@ -1,0 +1,1 @@
+Temporary validation marker for profile RLS and auth error message build.
