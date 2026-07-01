@@ -1,5 +1,6 @@
 -- Pile On The Salt community setup
 -- Run this in the Supabase SQL editor after creating your project.
+-- Safe to re-run when policies or helper functions are updated.
 
 create extension if not exists pgcrypto;
 
@@ -57,9 +58,28 @@ create or replace function public.is_verified_member()
 returns boolean
 language sql
 stable
+security definer
+set search_path = auth, public
 as $$
-  select auth.uid() is not null and coalesce((auth.jwt() ->> 'email_confirmed')::boolean, false);
+  select exists (
+    select 1
+    from auth.users
+    where id = auth.uid()
+      and email_confirmed_at is not null
+  );
 $$;
+
+grant execute on function public.is_verified_member() to authenticated;
+
+drop policy if exists "Verified users can read profiles" on public.profiles;
+drop policy if exists "Users can create their own profile after verification" on public.profiles;
+drop policy if exists "Users can set their username once" on public.profiles;
+drop policy if exists "Verified users can read chat rooms" on public.chat_rooms;
+drop policy if exists "Verified users can read messages" on public.chat_messages;
+drop policy if exists "Verified users can insert messages" on public.chat_messages;
+drop policy if exists "Users can delete their own messages" on public.chat_messages;
+drop policy if exists "Verified users can report messages" on public.message_reports;
+drop policy if exists "Users can read their own reports" on public.message_reports;
 
 create policy "Verified users can read profiles"
   on public.profiles for select
