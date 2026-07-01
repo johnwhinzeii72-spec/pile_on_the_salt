@@ -127,12 +127,7 @@ function App() {
             <p className="text-xs font-bold uppercase tracking-wide text-salt-700">Pile On The Salt</p>
             <h1 className="text-2xl font-black">{title}</h1>
           </div>
-          <button
-            type="button"
-            onClick={() => setPage('scanner')}
-            className="grid h-12 w-12 place-items-center rounded-full bg-salt-700 text-white shadow-soft"
-            aria-label="Open barcode scanner"
-          >
+          <button type="button" onClick={() => setPage('scanner')} className="grid h-12 w-12 place-items-center rounded-full bg-salt-700 text-white shadow-soft" aria-label="Open barcode scanner">
             <Camera size={22} />
           </button>
         </div>
@@ -154,12 +149,7 @@ function App() {
             const Icon = item.icon;
             const active = page === item.id;
             return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setPage(item.id)}
-                className={`flex min-h-14 flex-col items-center justify-center rounded-lg px-1 text-[11px] font-bold ${active ? 'bg-salt-50 text-salt-900' : 'text-slate-500'}`}
-              >
+              <button key={item.id} type="button" onClick={() => setPage(item.id)} className={`flex min-h-14 flex-col items-center justify-center rounded-lg px-1 text-[11px] font-bold ${active ? 'bg-salt-50 text-salt-900' : 'text-slate-500'}`}>
                 <Icon size={20} />
                 <span className="mt-1 truncate">{item.label}</span>
               </button>
@@ -294,6 +284,7 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
 
     try {
       const scanner = new Html5Qrcode('reader', {
+        verbose: false,
         formatsToSupport: [
           Html5QrcodeSupportedFormats.UPC_A,
           Html5QrcodeSupportedFormats.UPC_E,
@@ -350,14 +341,7 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
           <button type="button" onClick={() => void stop()} disabled={!scanning} className="rounded-lg border border-slate-300 px-4 py-3 font-bold text-slate-700 disabled:text-slate-300">Stop</button>
         </div>
         <form onSubmit={submitManualBarcode} className="mt-4 grid grid-cols-[1fr_auto] gap-2">
-          <input
-            value={manualBarcode}
-            onChange={(event) => setManualBarcode(event.target.value)}
-            inputMode="numeric"
-            autoComplete="off"
-            placeholder="Enter barcode"
-            className="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-salt-700"
-          />
+          <input value={manualBarcode} onChange={(event) => setManualBarcode(event.target.value)} inputMode="numeric" autoComplete="off" placeholder="Enter barcode" className="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-3 outline-none focus:border-salt-700" />
           <button type="submit" disabled={loading || !manualBarcode.trim()} className="grid h-12 w-12 place-items-center rounded-lg bg-slate-900 text-white disabled:bg-slate-300" aria-label="Look up barcode">
             {loading ? <Loader2 className="animate-spin" size={20} /> : <Search size={20} />}
           </button>
@@ -368,9 +352,7 @@ function Scanner({ onAdd, onManual }: { onAdd: (entry: Omit<FoodLog, 'id' | 'cre
       {(lookupState === 'not-found' || lookupState === 'api-error') && (
         <Panel title={lookupState === 'not-found' ? 'Product Not Found' : 'Lookup Error'}>
           <p className="text-sm font-semibold text-slate-600">
-            {lookupState === 'not-found'
-              ? `${barcode || 'That barcode'} was not found in Open Food Facts.`
-              : 'Open Food Facts could not be reached or returned an error.'}
+            {lookupState === 'not-found' ? `${barcode || 'That barcode'} was not found in Open Food Facts.` : 'Open Food Facts could not be reached or returned an error.'}
           </p>
           <div className="mt-4 grid grid-cols-2 gap-3">
             <button type="button" onClick={start} className="rounded-lg bg-salt-700 px-4 py-3 font-bold text-white">Scan Again</button>
@@ -416,18 +398,7 @@ function ManualEntry({ onAdd }: { onAdd: (entry: Omit<FoodLog, 'id' | 'createdAt
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    onAdd({
-      ...emptyNutrients,
-      name: textField(form, 'name') || 'Manual entry',
-      sodiumMg: numberField(form, 'sodiumMg'),
-      potassiumMg: numberField(form, 'potassiumMg'),
-      magnesiumMg: numberField(form, 'magnesiumMg'),
-      calciumMg: numberField(form, 'calciumMg'),
-      fluidsOz: numberField(form, 'fluidsOz'),
-      notes: textField(form, 'notes'),
-      source: 'manual',
-      multiplier: 1
-    });
+    onAdd({ ...emptyNutrients, name: textField(form, 'name') || 'Manual entry', sodiumMg: numberField(form, 'sodiumMg'), potassiumMg: numberField(form, 'potassiumMg'), magnesiumMg: numberField(form, 'magnesiumMg'), calciumMg: numberField(form, 'calciumMg'), fluidsOz: numberField(form, 'fluidsOz'), notes: textField(form, 'notes'), source: 'manual', multiplier: 1 });
     event.currentTarget.reset();
   };
 
@@ -438,16 +409,7 @@ function SymptomTracker({ onAdd, logs }: { onAdd: (entry: Omit<SymptomLog, 'id' 
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    onAdd({
-      dizziness: numberField(form, 'dizziness'),
-      fatigue: numberField(form, 'fatigue'),
-      brainFog: numberField(form, 'brainFog'),
-      nausea: numberField(form, 'nausea'),
-      pain: numberField(form, 'pain'),
-      heartRate: numberField(form, 'heartRate'),
-      standingTolerance: numberField(form, 'standingTolerance'),
-      notes: textField(form, 'notes')
-    });
+    onAdd({ dizziness: numberField(form, 'dizziness'), fatigue: numberField(form, 'fatigue'), brainFog: numberField(form, 'brainFog'), nausea: numberField(form, 'nausea'), pain: numberField(form, 'pain'), heartRate: numberField(form, 'heartRate'), standingTolerance: numberField(form, 'standingTolerance'), notes: textField(form, 'notes') });
     event.currentTarget.reset();
   };
 
@@ -502,19 +464,10 @@ function Insights({ foods, symptoms, settings }: { foods: FoodLog[]; symptoms: S
 function HelpNow({ settings }: { settings: Settings }) {
   return (
     <section className="space-y-5">
-      <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-rose-950">
-        <div className="flex items-start gap-3"><XCircle className="shrink-0" /><p className="font-bold">This app is not medical advice and does not diagnose, treat, or replace care from a clinician.</p></div>
-      </div>
-      <Panel title="POTS Flare Checklist">
-        <Checklist items={['Sit or lie down safely.', 'Elevate legs if that usually helps you.', 'Sip fluids and use your clinician-approved electrolyte or sodium plan.', 'Cool down with shade, fan, cool cloth, or lighter layers.', 'Avoid driving or standing alone until symptoms settle.', 'Contact your support person if you feel unsafe.']} />
-      </Panel>
-      <Panel title="Emergency Warning Signs">
-        <Checklist urgent items={['Chest pain, severe shortness of breath, or fainting with injury.', 'New weakness, trouble speaking, confusion, or one-sided symptoms.', 'Heart rate or symptoms that feel dangerous or unusual for you.', 'Signs of severe dehydration or inability to keep fluids down.', 'Any symptom your doctor told you requires urgent care.']} />
-      </Panel>
-      <Panel title="Contacts">
-        <p className="font-semibold text-slate-600">Emergency: {settings.emergencyContact || 'Not set'}</p>
-        <p className="mt-2 font-semibold text-slate-600">Doctor: {settings.doctorContact || 'Not set'}</p>
-      </Panel>
+      <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-rose-950"><div className="flex items-start gap-3"><XCircle className="shrink-0" /><p className="font-bold">This app is not medical advice and does not diagnose, treat, or replace care from a clinician.</p></div></div>
+      <Panel title="POTS Flare Checklist"><Checklist items={['Sit or lie down safely.', 'Elevate legs if that usually helps you.', 'Sip fluids and use your clinician-approved electrolyte or sodium plan.', 'Cool down with shade, fan, cool cloth, or lighter layers.', 'Avoid driving or standing alone until symptoms settle.', 'Contact your support person if you feel unsafe.']} /></Panel>
+      <Panel title="Emergency Warning Signs"><Checklist urgent items={['Chest pain, severe shortness of breath, or fainting with injury.', 'New weakness, trouble speaking, confusion, or one-sided symptoms.', 'Heart rate or symptoms that feel dangerous or unusual for you.', 'Signs of severe dehydration or inability to keep fluids down.', 'Any symptom your doctor told you requires urgent care.']} /></Panel>
+      <Panel title="Contacts"><p className="font-semibold text-slate-600">Emergency: {settings.emergencyContact || 'Not set'}</p><p className="mt-2 font-semibold text-slate-600">Doctor: {settings.doctorContact || 'Not set'}</p></Panel>
     </section>
   );
 }
@@ -539,15 +492,7 @@ function SettingsPage({ settings, setSettings }: { settings: Settings; setSettin
 }
 
 function EntryForm({ title, onSubmit, fields, includeNotes }: { title: string; onSubmit: (event: React.FormEvent<HTMLFormElement>) => void; fields: [string, string, string][]; includeNotes?: boolean }) {
-  return (
-    <Panel title={title}>
-      <form onSubmit={onSubmit} className="space-y-4">
-        {fields.map(([name, label, type]) => <Input key={name} name={name} label={label} type={type} />)}
-        {includeNotes && <TextArea name="notes" label="Notes" />}
-        <button className="w-full rounded-lg bg-salt-700 px-4 py-3 font-bold text-white">Add To Today</button>
-      </form>
-    </Panel>
-  );
+  return <Panel title={title}><form onSubmit={onSubmit} className="space-y-4">{fields.map(([name, label, type]) => <Input key={name} name={name} label={label} type={type} />)}{includeNotes && <TextArea name="notes" label="Notes" />}<button className="w-full rounded-lg bg-salt-700 px-4 py-3 font-bold text-white">Add To Today</button></form></Panel>;
 }
 
 function NutrientGrid({ nutrients, availability }: { nutrients: Nutrients; availability?: NutrientAvailability }) {
