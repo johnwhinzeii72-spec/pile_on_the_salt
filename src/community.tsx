@@ -14,7 +14,17 @@ const buttonSecondary = 'min-h-12 rounded-xl border border-slate-200 bg-white px
 type AuthView = 'auth' | 'forgot' | 'reset';
 
 const textField = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
-const authRedirectUrl = () => `${window.location.origin}${window.location.pathname}`;
+const signUpRedirectUrl = () => `${window.location.origin}${window.location.pathname}`;
+const recoveryRedirectUrl = () => `${window.location.origin}${window.location.pathname}?auth=recovery`;
+const recoveryParams = () => {
+  const search = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  return { search, hash };
+};
+const isRecoveryUrl = () => {
+  const { search, hash } = recoveryParams();
+  return search.get('auth') === 'recovery' || search.get('type') === 'recovery' || hash.get('type') === 'recovery';
+};
 
 function CommunityChatV2() {
   const [session, setSession] = useState<Session | null>(null);
@@ -23,7 +33,7 @@ function CommunityChatV2() {
   const [selectedRoom, setSelectedRoom] = useState<ChatRoom | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState('');
-  const [authView, setAuthView] = useState<AuthView>('auth');
+  const [authView, setAuthView] = useState<AuthView>(() => isRecoveryUrl() ? 'reset' : 'auth');
   const [busy, setBusy] = useState(false);
   const user = session?.user ?? null;
   const verified = Boolean(user?.email_confirmed_at);
@@ -31,10 +41,20 @@ function CommunityChatV2() {
 
   useEffect(() => {
     if (!client) return;
-    client.auth.getSession().then(({ data }) => setSession(data.session));
+    if (isRecoveryUrl()) {
+      setAuthView('reset');
+      setStatus('Enter a new password to finish resetting your account.');
+    }
+    client.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      if (isRecoveryUrl()) {
+        setAuthView('reset');
+        setStatus('Enter a new password to finish resetting your account.');
+      }
+    });
     const { data: listener } = client.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
-      if (event === 'PASSWORD_RECOVERY') {
+      if (event === 'PASSWORD_RECOVERY' || isRecoveryUrl()) {
         setAuthView('reset');
         setStatus('Enter a new password to finish resetting your account.');
       }
@@ -91,7 +111,7 @@ function CommunityChatV2() {
     const { error } = await client.auth.signUp({
       email: textField(form, 'email'),
       password: textField(form, 'password'),
-      options: { emailRedirectTo: authRedirectUrl() }
+      options: { emailRedirectTo: signUpRedirectUrl() }
     });
     setStatus(error ? error.message : 'Check your email to verify your account before posting.');
     setBusy(false);
@@ -112,7 +132,7 @@ function CommunityChatV2() {
     if (!client) return;
     setBusy(true);
     const form = new FormData(event.currentTarget);
-    const { error } = await client.auth.resetPasswordForEmail(textField(form, 'email'), { redirectTo: authRedirectUrl() });
+    const { error } = await client.auth.resetPasswordForEmail(textField(form, 'email'), { redirectTo: recoveryRedirectUrl() });
     setStatus(error ? error.message : 'Password reset email sent. Open it on this device to set a new password.');
     setBusy(false);
   };
@@ -130,7 +150,10 @@ function CommunityChatV2() {
     setBusy(true);
     const { error } = await client.auth.updateUser({ password });
     setStatus(error ? error.message : 'Password updated. You can continue to chat.');
-    if (!error) setAuthView('auth');
+    if (!error) {
+      setAuthView('auth');
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
     setBusy(false);
   };
 
