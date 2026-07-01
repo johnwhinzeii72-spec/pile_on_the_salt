@@ -44,9 +44,12 @@ export type Settings = {
   doctorContact: string;
 };
 
+export type NutrientAvailability = Partial<Record<keyof Nutrients, boolean>>;
+
 export type ProductNutrition = Nutrients & {
   barcode: string;
   name: string;
   brand?: string;
   servingSize?: string;
+  availableNutrients: NutrientAvailability;
 };
