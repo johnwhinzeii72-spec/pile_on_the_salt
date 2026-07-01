@@ -8,7 +8,7 @@ create table if not exists public.profiles (
   username text unique,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  constraint username_format check (username is null or username ~ '^[A-Za-z0-9_]{3,24}$')
+  constraint username_format check (username is null or username ~ '^[A-Za-z0-9_]{3,20}$')
 );
 
 create table if not exists public.chat_rooms (
