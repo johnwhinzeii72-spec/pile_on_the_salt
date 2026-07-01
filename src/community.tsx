@@ -25,6 +25,16 @@ const isRecoveryUrl = () => {
   const { search, hash } = recoveryParams();
   return search.get('auth') === 'recovery' || search.get('type') === 'recovery' || hash.get('type') === 'recovery';
 };
+const friendlySupabaseError = (message: string) => {
+  const lower = message.toLowerCase();
+  if (lower.includes('email rate limit')) {
+    return 'Too many emails were sent recently. Please wait a few minutes before trying again. For production, configure custom SMTP in Supabase Auth to raise this limit.';
+  }
+  if (lower.includes('row-level security') && lower.includes('profiles')) {
+    return 'Nickname setup is blocked by Supabase security policies. Run the latest supabase/community_schema.sql in the Supabase SQL editor, then log out and back in.';
+  }
+  return message;
+};
 
 function CommunityChatV2() {
   const [session, setSession] = useState<Session | null>(null);
@@ -113,7 +123,7 @@ function CommunityChatV2() {
       password: textField(form, 'password'),
       options: { emailRedirectTo: signUpRedirectUrl() }
     });
-    setStatus(error ? error.message : 'Check your email to verify your account before posting.');
+    setStatus(error ? friendlySupabaseError(error.message) : 'Check your email to verify your account before posting.');
     setBusy(false);
   };
 
@@ -133,7 +143,7 @@ function CommunityChatV2() {
     setBusy(true);
     const form = new FormData(event.currentTarget);
     const { error } = await client.auth.resetPasswordForEmail(textField(form, 'email'), { redirectTo: recoveryRedirectUrl() });
-    setStatus(error ? error.message : 'Password reset email sent. Open it on this device to set a new password.');
+    setStatus(error ? friendlySupabaseError(error.message) : 'Password reset email sent. Open it on this device to set a new password.');
     setBusy(false);
   };
 
@@ -149,7 +159,7 @@ function CommunityChatV2() {
     }
     setBusy(true);
     const { error } = await client.auth.updateUser({ password });
-    setStatus(error ? error.message : 'Password updated. You can continue to chat.');
+    setStatus(error ? friendlySupabaseError(error.message) : 'Password updated. You can continue to chat.');
     if (!error) {
       setAuthView('auth');
       window.history.replaceState({}, document.title, window.location.pathname);
@@ -187,7 +197,7 @@ function CommunityChatV2() {
       return;
     }
     const { error } = await client.from('profiles').upsert({ id: user.id, username }, { onConflict: 'id' });
-    if (error) setStatus(error.message);
+    if (error) setStatus(friendlySupabaseError(error.message));
     else {
       setStatus('');
       await loadProfile(user);
