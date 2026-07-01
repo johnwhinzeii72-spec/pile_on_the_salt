@@ -15,9 +15,11 @@ export default defineConfig({
         theme_color: '#0f766e',
         background_color: '#f8fafc',
         display: 'standalone',
+        display_override: ['standalone', 'minimal-ui'],
         orientation: 'portrait',
         scope: '/',
         start_url: '/',
+        categories: ['health', 'lifestyle', 'food'],
         icons: [
           { src: '/icons/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }
         ]
