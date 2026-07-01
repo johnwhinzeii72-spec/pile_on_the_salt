@@ -9,6 +9,7 @@ const appFlowOverrides = (): Plugin => ({
     if (!id.endsWith('/src/App.tsx') && !id.endsWith('\\src\\App.tsx')) return null;
     return code
       .replace("import { fetchProduct } from './openFoodFacts';", "import { fetchProduct } from './openFoodFacts';\nimport CommunityChatV2 from './community';\nimport ReliableScanner from './reliableScanner';")
+      .replace("const [page, setPage] = useState<PageId>('dashboard');", "const [page, setPage] = useState<PageId>(() => { const search = new URLSearchParams(window.location.search); const hash = new URLSearchParams(window.location.hash.replace(/^#/, '')); return search.get('auth') === 'recovery' || search.get('type') === 'recovery' || hash.get('type') === 'recovery' ? 'community' : 'dashboard'; });")
       .replace("{page === 'scanner' && <Scanner onAdd={addFood} onManual={() => setPage('manual')} onSaveFood={saveFavorite} />}", "{page === 'scanner' && <ReliableScanner onAdd={addFood} onManual={() => setPage('manual')} onSaveFood={saveFavorite} />}")
       .replace("{page === 'community' && <CommunityChat />}", "{page === 'community' && <CommunityChatV2 />}");
   }
