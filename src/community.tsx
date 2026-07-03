@@ -14,16 +14,27 @@ const buttonSecondary = 'min-h-12 rounded-xl border border-slate-200 bg-white px
 type AuthView = 'auth' | 'forgot' | 'reset';
 
 const textField = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
-const signUpRedirectUrl = () => `${window.location.origin}${window.location.pathname}`;
-const recoveryRedirectUrl = () => `${window.location.origin}${window.location.pathname}?auth=recovery`;
-const recoveryParams = () => {
+const communityAuthRedirectUrl = (auth: 'verify' | 'recovery') => {
+  const url = new URL(window.location.href);
+  url.searchParams.set('page', 'community');
+  url.searchParams.set('auth', auth);
+  url.hash = '';
+  return url.toString();
+};
+const signUpRedirectUrl = () => communityAuthRedirectUrl('verify');
+const recoveryRedirectUrl = () => communityAuthRedirectUrl('recovery');
+const authParams = () => {
   const search = new URLSearchParams(window.location.search);
   const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
   return { search, hash };
 };
 const isRecoveryUrl = () => {
-  const { search, hash } = recoveryParams();
+  const { search, hash } = authParams();
   return search.get('auth') === 'recovery' || search.get('type') === 'recovery' || hash.get('type') === 'recovery';
+};
+const isVerificationUrl = () => {
+  const { search, hash } = authParams();
+  return search.get('auth') === 'verify' || ['signup', 'invite', 'email_change'].includes(search.get('type') ?? '') || ['signup', 'invite', 'email_change'].includes(hash.get('type') ?? '');
 };
 const friendlySupabaseError = (message: string) => {
   const lower = message.toLowerCase();
@@ -54,12 +65,16 @@ function CommunityChatV2() {
     if (isRecoveryUrl()) {
       setAuthView('reset');
       setStatus('Enter a new password to finish resetting your account.');
+    } else if (isVerificationUrl()) {
+      setStatus('Finishing email verification...');
     }
     client.auth.getSession().then(({ data }) => {
       setSession(data.session);
       if (isRecoveryUrl()) {
         setAuthView('reset');
         setStatus('Enter a new password to finish resetting your account.');
+      } else if (isVerificationUrl()) {
+        setStatus(data.session?.user.email_confirmed_at ? 'Email verified. Create a username to enter chat.' : 'Email verification opened. If this does not update, log in with your verified email.');
       }
     });
     const { data: listener } = client.auth.onAuthStateChange((event, nextSession) => {
@@ -67,6 +82,8 @@ function CommunityChatV2() {
       if (event === 'PASSWORD_RECOVERY' || isRecoveryUrl()) {
         setAuthView('reset');
         setStatus('Enter a new password to finish resetting your account.');
+      } else if (event === 'SIGNED_IN' && isVerificationUrl()) {
+        setStatus('Email verified. Create a username to enter chat.');
       }
     });
     return () => listener.subscription.unsubscribe();
