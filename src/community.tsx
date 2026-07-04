@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import { Eye, EyeOff, Loader2 } from 'lucide-react';
@@ -14,6 +14,8 @@ const buttonSecondary = 'min-h-12 rounded-xl border border-slate-200 bg-white px
 type AuthView = 'auth' | 'forgot' | 'reset';
 
 const textField = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
+const pendingId = () => `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const formatTime = (value: string) => new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(value));
 const communityAuthRedirectUrl = (auth: 'verify' | 'recovery') => {
   const url = new URL(window.location.href);
   url.searchParams.set('page', 'community');
@@ -38,12 +40,8 @@ const isVerificationUrl = () => {
 };
 const friendlySupabaseError = (message: string) => {
   const lower = message.toLowerCase();
-  if (lower.includes('email rate limit')) {
-    return 'Too many emails were sent recently. Please wait a few minutes before trying again. For production, configure custom SMTP in Supabase Auth to raise this limit.';
-  }
-  if (lower.includes('row-level security') && lower.includes('profiles')) {
-    return 'Nickname setup is blocked by Supabase security policies. Run the latest supabase/community_schema.sql in the Supabase SQL editor, then log out and back in.';
-  }
+  if (lower.includes('email rate limit')) return 'Too many emails were sent recently. Please wait a few minutes before trying again. For production, configure custom SMTP in Supabase Auth to raise this limit.';
+  if (lower.includes('row-level security') && lower.includes('profiles')) return 'Nickname setup is blocked by Supabase security policies. Run the latest supabase/community_schema.sql in the Supabase SQL editor, then log out and back in.';
   return message;
 };
 
@@ -56,6 +54,10 @@ function CommunityChatV2() {
   const [status, setStatus] = useState('');
   const [authView, setAuthView] = useState<AuthView>(() => isRecoveryUrl() ? 'reset' : 'auth');
   const [busy, setBusy] = useState(false);
+  const [messageText, setMessageText] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const [sendState, setSendState] = useState('');
+  const bottomRef = useRef<HTMLDivElement | null>(null);
   const user = session?.user ?? null;
   const verified = Boolean(user?.email_confirmed_at);
   const client = supabase;
@@ -102,6 +104,10 @@ function CommunityChatV2() {
     if (selectedRoom && user && verified && profile?.username) void loadMessages(selectedRoom.id);
   }, [selectedRoom?.id, user?.id, verified, profile?.username]);
 
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length, selectedRoom?.id, sendState]);
+
   const loadProfile = async (currentUser: User) => {
     if (!client) return;
     const { data } = await client.from('profiles').select('id, username, created_at').eq('id', currentUser.id).maybeSingle();
@@ -135,11 +141,7 @@ function CommunityChatV2() {
     if (!client) return;
     setBusy(true);
     const form = new FormData(event.currentTarget);
-    const { error } = await client.auth.signUp({
-      email: textField(form, 'email'),
-      password: textField(form, 'password'),
-      options: { emailRedirectTo: signUpRedirectUrl() }
-    });
+    const { error } = await client.auth.signUp({ email: textField(form, 'email'), password: textField(form, 'password'), options: { emailRedirectTo: signUpRedirectUrl() } });
     setStatus(error ? friendlySupabaseError(error.message) : 'Check your email to verify your account before posting.');
     setBusy(false);
   };
@@ -224,19 +226,31 @@ function CommunityChatV2() {
 
   const sendMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (isSending) return;
     if (!client || !user || !selectedRoom || !profile?.username) {
       setStatus('Create a username before posting.');
       return;
     }
-    const form = new FormData(event.currentTarget);
-    const body = textField(form, 'body');
+    const body = messageText.trim();
     if (!body) return;
-    const { error } = await client.from('chat_messages').insert({ room_id: selectedRoom.id, user_id: user.id, username: profile.username, body });
-    if (error) setStatus(error.message);
-    else {
-      event.currentTarget.reset();
-      await loadMessages(selectedRoom.id);
+    const optimistic: ChatMessage = { id: pendingId(), room_id: selectedRoom.id, user_id: user.id, username: profile.username, body, created_at: new Date().toISOString() };
+    setIsSending(true);
+    setSendState('Sending...');
+    setStatus('');
+    setMessageText('');
+    setMessages((current) => [...current, optimistic]);
+    const { data, error } = await client.from('chat_messages').insert({ room_id: selectedRoom.id, user_id: user.id, username: profile.username, body }).select('id, room_id, user_id, username, body, created_at').single();
+    if (error) {
+      setMessages((current) => current.filter((message) => message.id !== optimistic.id));
+      setMessageText(body);
+      setStatus(friendlySupabaseError(error.message));
+      setSendState('Could not send');
+    } else {
+      setMessages((current) => current.map((message) => message.id === optimistic.id ? data as ChatMessage : message));
+      setSendState('Sent');
+      window.setTimeout(() => setSendState(''), 1600);
     }
+    setIsSending(false);
   };
 
   const deleteMessage = async (message: ChatMessage) => {
@@ -252,27 +266,21 @@ function CommunityChatV2() {
     setStatus(error ? error.message : 'Message reported. Thank you.');
   };
 
-  if (!isSupabaseConfigured) {
-    return <Panel title="Community Setup Needed"><p className="font-semibold text-slate-600 dark:text-slate-300">Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to enable Community Chat. The rest of the app works without login.</p></Panel>;
-  }
+  if (!isSupabaseConfigured) return <Panel title="Community Setup Needed"><p className="font-semibold text-slate-600 dark:text-slate-300">Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to enable Community Chat. The rest of the app works without login.</p></Panel>;
+  if (authView === 'reset') return <section className="space-y-5"><Panel title="Reset Password"><ResetPasswordForm onSubmit={updatePassword} status={status} busy={busy} onBack={() => setAuthView('auth')} /></Panel></section>;
+  if (!user) return <section className="space-y-5"><Panel title="Community Rules"><CommunityRules /></Panel>{authView === 'forgot' ? <Panel title="Reset Password"><ResetRequestForm onSubmit={sendResetEmail} status={status} busy={busy} onBack={() => setAuthView('auth')} /></Panel> : <AuthForms onLogin={login} onSignUp={signUp} onForgot={() => { setAuthView('forgot'); setStatus(''); }} status={status} busy={busy} />}</section>;
+  if (!verified) return <Panel title="Email Verification Required"><p className="font-semibold text-slate-600 dark:text-slate-300">Please verify your email before creating a username or posting. Your email is never shown publicly.</p><button type="button" onClick={logout} className={`${buttonSecondary} mt-4`}>Log out</button></Panel>;
+  if (!profile?.username) return <Panel title="Create Display Username"><p className="mb-4 text-sm font-semibold text-slate-600 dark:text-slate-300">Choose one public nickname. It can only be set once. Use 3-20 letters, numbers, or underscores. No spaces.</p><form onSubmit={createUsername} className="space-y-4"><label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">Display username</span><input name="username" type="text" minLength={3} maxLength={20} pattern="[A-Za-z0-9_]{3,20}" autoCapitalize="none" autoCorrect="off" className={inputClass} /></label><button disabled={busy} className={buttonPrimary}>{busy ? <InlineLoader text="Checking username" /> : 'Create Username'}</button></form>{status && <p className="mt-3 text-sm font-bold text-rose-700 dark:text-rose-200">{status}</p>}</Panel>;
 
-  if (authView === 'reset') {
-    return <section className="space-y-5"><Panel title="Reset Password"><ResetPasswordForm onSubmit={updatePassword} status={status} busy={busy} onBack={() => setAuthView('auth')} /></Panel></section>;
-  }
+  const roomList = rooms.length ? rooms : fallbackRooms.map((name, index) => ({ id: String(index), slug: name.toLowerCase().replaceAll(' ', '-'), name }));
 
-  if (!user) {
-    return <section className="space-y-5"><Panel title="Community Rules"><CommunityRules /></Panel>{authView === 'forgot' ? <Panel title="Reset Password"><ResetRequestForm onSubmit={sendResetEmail} status={status} busy={busy} onBack={() => setAuthView('auth')} /></Panel> : <AuthForms onLogin={login} onSignUp={signUp} onForgot={() => { setAuthView('forgot'); setStatus(''); }} status={status} busy={busy} />}</section>;
-  }
+  return <section className="space-y-4"><Panel title="Community"><CommunityRules /><div className="mt-4 flex items-center justify-between gap-3 rounded-xl bg-emerald-50 px-3 py-2 dark:bg-emerald-500/10"><p className="text-sm font-bold text-emerald-950 dark:text-emerald-100">Posting as {profile.username}</p><button type="button" onClick={logout} className="min-h-10 rounded-lg px-3 text-sm font-bold text-slate-600 transition active:scale-95 dark:text-slate-300">Log out</button></div></Panel><Panel title="Rooms"><div className="flex gap-2 overflow-x-auto pb-1" aria-label="Chat rooms">{roomList.map((room) => <button key={room.id} type="button" onClick={() => setSelectedRoom(room as ChatRoom)} aria-pressed={selectedRoom?.id === room.id} className={`min-h-11 shrink-0 rounded-full px-4 py-2 text-sm font-bold transition active:scale-95 ${selectedRoom?.id === room.id ? 'bg-emerald-100 text-emerald-950 ring-1 ring-emerald-200 dark:bg-emerald-400/20 dark:text-emerald-50 dark:ring-emerald-400/25' : 'bg-slate-50 text-slate-600 ring-1 ring-slate-100 dark:bg-slate-800/70 dark:text-slate-300 dark:ring-slate-700'}`}>{room.name}</button>)}</div></Panel><Panel title={selectedRoom?.name ?? 'Messages'}>{status && <p role="alert" className="mb-3 rounded-xl bg-rose-50 p-3 text-sm font-bold text-rose-800 dark:bg-rose-500/15 dark:text-rose-100">{status}</p>}<div className="rounded-2xl bg-emerald-50/45 p-2 ring-1 ring-emerald-100 dark:bg-slate-950 dark:ring-slate-800"><div className="max-h-[58vh] space-y-3 overflow-y-auto px-1 py-2" aria-live="polite">{messages.length === 0 ? <Empty text="No messages yet. You can start gently." /> : messages.map((message) => <MessageBubble key={message.id} message={message} currentUserId={user.id} onReport={() => reportMessage(message)} onDelete={() => deleteMessage(message)} />)}<div ref={bottomRef} /></div><form onSubmit={sendMessage} className="mt-2 rounded-2xl bg-white p-3 shadow-sm ring-1 ring-emerald-100 dark:bg-slate-900 dark:ring-slate-800"><label className="block"><span className="sr-only">Message</span><textarea value={messageText} onChange={(event) => setMessageText(event.target.value)} disabled={isSending} rows={3} maxLength={1000} placeholder="Share something supportive..." className="min-h-24 w-full resize-none rounded-xl border border-emerald-100 bg-emerald-50/60 px-3 py-3 text-base font-semibold text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:ring-4 focus:ring-emerald-100 disabled:opacity-70 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:ring-emerald-500/15" /></label><div className="mt-3 flex items-center justify-between gap-3"><p role="status" className="min-h-5 text-xs font-bold text-slate-500 dark:text-slate-400">{sendState}</p><button disabled={isSending || !messageText.trim()} className="min-h-11 rounded-xl bg-emerald-700 px-5 py-2 text-sm font-black text-white transition active:scale-95 disabled:bg-slate-300 dark:bg-emerald-400 dark:text-slate-950 dark:disabled:bg-slate-700 dark:disabled:text-slate-400">{isSending ? <InlineLoader text="Sending" /> : 'Send'}</button></div></form></div></Panel></section>;
+}
 
-  if (!verified) {
-    return <Panel title="Email Verification Required"><p className="font-semibold text-slate-600 dark:text-slate-300">Please verify your email before creating a username or posting. Your email is never shown publicly.</p><button type="button" onClick={logout} className={`${buttonSecondary} mt-4`}>Log out</button></Panel>;
-  }
-
-  if (!profile?.username) {
-    return <Panel title="Create Display Username"><p className="mb-4 text-sm font-semibold text-slate-600 dark:text-slate-300">Choose one public nickname. It can only be set once. Use 3-20 letters, numbers, or underscores. No spaces.</p><form onSubmit={createUsername} className="space-y-4"><label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">Display username</span><input name="username" type="text" minLength={3} maxLength={20} pattern="[A-Za-z0-9_]{3,20}" autoCapitalize="none" autoCorrect="off" className={inputClass} /></label><button disabled={busy} className={buttonPrimary}>{busy ? <InlineLoader text="Checking username" /> : 'Create Username'}</button></form>{status && <p className="mt-3 text-sm font-bold text-rose-700 dark:text-rose-200">{status}</p>}</Panel>;
-  }
-
-  return <section className="space-y-5"><Panel title="Community Rules"><CommunityRules /><div className="mt-4 flex items-center justify-between gap-3"><p className="text-sm font-bold text-slate-600 dark:text-slate-300">Posting as {profile.username}</p><button type="button" onClick={logout} className={buttonSecondary}>Log out</button></div></Panel><Panel title="Chat Rooms"><div className="flex gap-2 overflow-x-auto pb-2">{(rooms.length ? rooms : fallbackRooms.map((name, index) => ({ id: String(index), slug: name.toLowerCase().replaceAll(' ', '-'), name }))).map((room) => <button key={room.id} type="button" onClick={() => setSelectedRoom(room as ChatRoom)} className={`min-h-11 rounded-xl px-3 py-2 text-sm font-bold ${selectedRoom?.id === room.id ? 'bg-salt-700 text-white dark:bg-salt-500 dark:text-slate-950' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'}`}>{room.name}</button>)}</div></Panel><Panel title={selectedRoom?.name ?? 'Messages'}>{status && <p className="mb-3 text-sm font-bold text-rose-700 dark:text-rose-200">{status}</p>}<div className="space-y-3">{messages.length === 0 ? <Empty text="No messages yet." /> : messages.map((message) => <div key={message.id} className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800"><div className="flex items-start justify-between gap-3"><div><p className="font-black">{message.username || 'Member'}</p><p className="text-xs font-semibold text-slate-500 dark:text-slate-400">{new Date(message.created_at).toLocaleString()}</p></div><div className="flex gap-2"><button type="button" onClick={() => reportMessage(message)} className="text-xs font-bold text-amber-700 dark:text-amber-300">Report</button>{message.user_id === user.id && <button type="button" onClick={() => deleteMessage(message)} className="text-xs font-bold text-rose-700 dark:text-rose-300">Delete</button>}<button type="button" disabled className="text-xs font-bold text-slate-400">Admin delete</button></div></div><p className="mt-2 whitespace-pre-wrap text-sm font-semibold text-slate-700 dark:text-slate-200">{message.body}</p></div>)}</div><form onSubmit={sendMessage} className="mt-4 space-y-3"><TextArea name="body" label="Message" /><button className={buttonPrimary}>Send Message</button></form></Panel></section>;
+function MessageBubble({ message, currentUserId, onReport, onDelete }: { message: ChatMessage; currentUserId: string; onReport: () => void; onDelete: () => void }) {
+  const own = message.user_id === currentUserId;
+  const pending = message.id.startsWith('pending-');
+  return <article className={`flex ${own ? 'justify-end' : 'justify-start'}`} aria-label={`Message from ${message.username || 'Member'}`}><div className={`max-w-[88%] rounded-2xl px-3 py-3 shadow-sm ring-1 ${own ? 'bg-emerald-700 text-white ring-emerald-700/10 dark:bg-emerald-500 dark:text-slate-950' : 'bg-white text-slate-800 ring-emerald-100 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-800'}`}><div className="flex flex-wrap items-baseline gap-x-2 gap-y-1"><p className={`text-sm font-black ${own ? 'text-white dark:text-slate-950' : 'text-emerald-950 dark:text-emerald-100'}`}>{message.username || 'Member'}</p><time className={`text-[11px] font-bold ${own ? 'text-emerald-50/80 dark:text-slate-800' : 'text-slate-400 dark:text-slate-500'}`} dateTime={message.created_at}>{formatTime(message.created_at)}</time>{pending && <span className="text-[11px] font-bold opacity-80">sending</span>}</div><p className="mt-2 whitespace-pre-wrap text-sm font-semibold leading-6">{message.body}</p><div className={`mt-2 flex justify-end gap-3 text-[11px] font-bold ${own ? 'text-emerald-50/85 dark:text-slate-800' : 'text-slate-400 dark:text-slate-500'}`}><button type="button" onClick={onReport} className="min-h-8">Report</button>{own && !pending && <button type="button" onClick={onDelete} className="min-h-8">Delete</button>}<button type="button" disabled className="min-h-8 opacity-50">Admin</button></div></div></article>;
 }
 
 function AuthForms({ onLogin, onSignUp, onForgot, status, busy }: { onLogin: (event: FormEvent<HTMLFormElement>) => void; onSignUp: (event: FormEvent<HTMLFormElement>) => void; onForgot: () => void; status: string; busy: boolean }) {
@@ -297,20 +305,16 @@ function Input({ name, label, type, autoComplete }: { name: string; label: strin
   return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><input name={name} type={type} autoComplete={autoComplete} className={inputClass} /></label>;
 }
 
-function TextArea({ name, label }: { name: string; label: string }) {
-  return <label className="block"><span className="text-sm font-bold text-slate-600 dark:text-slate-300">{label}</span><textarea name={name} rows={4} className={inputClass} /></label>;
-}
-
 function Panel({ title, children }: { title: string; children: ReactNode }) {
   return <section className="rounded-2xl bg-white p-4 shadow-soft transition-colors dark:bg-slate-900 dark:shadow-night"><h2 className="mb-4 text-lg font-black">{title}</h2>{children}</section>;
 }
 
 function CommunityRules() {
-  return <div className="space-y-2 text-sm font-semibold text-slate-600 dark:text-slate-300"><p>Be kind, avoid medical directives, protect privacy, and do not share anyone's email or private details.</p><p>Abuse, harassment, spam, or dangerous advice may be reported. Moderation is minimal for now.</p></div>;
+  return <div className="space-y-2 text-sm font-semibold text-slate-600 dark:text-slate-300"><p>Be kind, avoid medical directives, protect privacy, and do not share anyone's email or private details.</p><p>Share support and lived experience, not medical directives. Reports are reviewed with minimal moderation for now.</p></div>;
 }
 
 function Empty({ text }: { text: string }) {
-  return <div role="status" className="rounded-xl bg-slate-50 p-4 text-center text-sm font-bold text-slate-500 dark:bg-slate-800/70 dark:text-slate-400">{text}</div>;
+  return <div role="status" className="rounded-xl bg-white/80 p-4 text-center text-sm font-bold text-slate-500 ring-1 ring-emerald-100 dark:bg-slate-900 dark:text-slate-400 dark:ring-slate-800">{text}</div>;
 }
 
 function InlineLoader({ text }: { text: string }) {
